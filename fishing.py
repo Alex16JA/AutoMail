@@ -5,8 +5,9 @@ import os
 import re
 import sys
 import time
-from urllib.parse import urlparse, quote_plus, unquote
+from urllib.parse import urlparse, quote_plus
 from bs4 import BeautifulSoup
+from duckduckgo_search import DDGS
 from fishing_config import (
     FRANCE_TRAVAIL_CLIENT_ID,
     FRANCE_TRAVAIL_CLIENT_SECRET,
@@ -15,9 +16,8 @@ from fishing_config import (
 
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-    "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "DNT": "1",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "fr-FR,fr;q=0.9",
 }
 
 JOB_SITES = [
@@ -45,20 +45,37 @@ REGIONS_LABEL = {
     "pays-de-la-loire": "Pays de la Loire", "provence-alpes-cote-d-azur": "Provence-Alpes-Côte d'Azur",
 }
 
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SENT_FILE = os.path.join(SCRIPT_DIR, "emails_envoyes.txt")
+
+
+# ============================================================
+# TRACKING EMAILS ENVOYES
+# ============================================================
+def charger_emails_envoyes():
+    """Charge la liste des emails deja envoyes"""
+    if not os.path.exists(SENT_FILE):
+        return set()
+    with open(SENT_FILE, "r", encoding="utf-8") as f:
+        return set(line.strip().lower() for line in f if line.strip())
+
+
+def sauver_email_envoye(email):
+    """Ajoute un email a la liste des envoyes"""
+    with open(SENT_FILE, "a", encoding="utf-8") as f:
+        f.write(email.strip().lower() + "\n")
+
 
 # ============================================================
 # VALIDATION EMAIL
 # ============================================================
 def is_valid_email(email):
-    """Verifie qu'une string est bien un email valide"""
     if not email or "@" not in email:
         return False
-    # Doit matcher le format basique email
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     if not re.match(pattern, email.strip()):
         return False
-    # Rejeter les trucs qui sont clairement pas des emails
-    bad = ["francetravail.fr", "candidat.", "postuler", "lien", "http", "offres"]
+    bad = ["francetravail.fr", "candidat.", "postuler", "lien", "http", "offres", "example."]
     for b in bad:
         if b in email.lower():
             return False
@@ -149,159 +166,106 @@ def chercher_france_travail(token, mots_cles, region_code):
 
 
 # ============================================================
-# SOURCE 2 : DUCKDUCKGO (ne bloque pas comme Google)
+# SOURCE 2 : DUCKDUCKGO (via lib python - bypass CAPTCHA)
 # ============================================================
-def duckduckgo_search(query, max_results=30):
-    """Cherche sur DuckDuckGo HTML (pas de CAPTCHA)"""
-    resultats = []
-    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
+def chercher_duckduckgo_jobs(mots_cles, region_label, types):
+    """Cherche sur DuckDuckGo via la lib python (contourne les CAPTCHA)"""
+    offres = []
+    entreprises_vues = set()
 
-    try:
-        resp = requests.get(url, headers={
-            "User-Agent": HEADERS["User-Agent"],
-            "Accept": "text/html",
-        }, timeout=15)
+    for t in types:
+        queries = [
+            f'{t} {mots_cles} {region_label}',
+            f'{t} {mots_cles} {region_label} recrutement',
+            f'{t} {mots_cles} {region_label} offre emploi entreprise',
+        ]
 
-        if resp.status_code != 200:
-            return resultats
+        for query in queries:
+            try:
+                with DDGS() as ddgs:
+                    results = list(ddgs.text(query, region="fr-fr", max_results=20))
 
-        soup = BeautifulSoup(resp.text, "html.parser")
+                print(f"    [{t}] {len(results)} resultats pour : {query[:55]}...")
 
-        # DuckDuckGo HTML results
-        for result in soup.find_all("div", class_="result"):
-            title_el = result.find("a", class_="result__a")
-            snippet_el = result.find("a", class_="result__snippet")
+                for r in results:
+                    url = r.get("href", "")
+                    titre = r.get("title", "")
+                    snippet = r.get("body", "")
 
-            if not title_el:
-                continue
+                    entreprise = extraire_entreprise_from_result(titre, url)
+                    if entreprise and entreprise.lower() not in entreprises_vues:
+                        entreprises_vues.add(entreprise.lower())
 
-            href = title_el.get("href", "")
-            # DuckDuckGo encode les URLs via redirect
-            if "uddg=" in href:
-                match = re.search(r'uddg=([^&]+)', href)
-                if match:
-                    href = unquote(match.group(1))
+                        url_ent = ""
+                        parsed = urlparse(url)
+                        domain = (parsed.netloc or "").replace("www.", "")
+                        if domain and not any(jb in domain for jb in JOB_SITES):
+                            url_ent = f"https://{domain}"
 
-            titre = title_el.get_text(strip=True)
-            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+                        email = ""
+                        found = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', snippet)
+                        for f in found:
+                            if is_valid_email(f):
+                                email = f.lower()
+                                break
 
-            if href and titre:
-                resultats.append({"url": href, "titre": titre, "snippet": snippet})
+                        offres.append({
+                            "titre": titre,
+                            "entreprise": entreprise,
+                            "url_entreprise": url_ent,
+                            "lieu": region_label,
+                            "email": email,
+                            "source": f"DuckDuckGo ({domain})" if domain else "DuckDuckGo",
+                        })
 
-            if len(resultats) >= max_results:
-                break
+            except Exception as e:
+                print(f"    [!] Erreur DDG : {e}")
 
-    except Exception as e:
-        print(f"    [!] Erreur DuckDuckGo : {e}")
+            time.sleep(1)
 
-    return resultats
+    return offres
 
 
-def extraire_entreprise_from_result(resultat):
-    """Extraire le nom de l'entreprise depuis un résultat de recherche"""
-    titre = resultat["titre"]
-    url = resultat["url"]
-
-    entreprise = ""
-
-    # WTTJ : /companies/nom-entreprise
+def extraire_entreprise_from_result(titre, url):
+    """Extrait le nom d'entreprise depuis un résultat de recherche"""
+    # WTTJ
     if "welcometothejungle.com" in url:
         match = re.search(r'/companies/([^/]+)', url)
         if match:
             return match.group(1).replace("-", " ").title()
 
-    # Patterns dans les titres
-    # "Poste - Entreprise - Lieu" ou "Poste | Entreprise"
+    # Patterns dans les titres : "Poste - Entreprise - Lieu"
     parts = re.split(r'\s*[-|–—]\s*', titre)
 
-    # Filtrer les parties qui sont des noms de job boards ou des postes generiques
     noise = {"indeed", "hellowork", "linkedin", "glassdoor", "apec", "monster",
              "cadremploi", "welcome to the jungle", "meteojob", "talent.com",
              "jooble", "optioncarriere", "keljob", "regionsjob", "jobijoba",
              "stage", "alternance", "emploi", "offre", "offres", "paris",
-             "france", "ile de france", "h/f", "f/h", "cdi", "cdd", "recrutement",
+             "france", "ile de france", "île de france", "h/f", "f/h", "cdi", "cdd",
              "wizbii", "jobteaser", "directemploi", "studyrama", "letudiant",
-             "postuler", "candidature", "recherche", "stepstone"}
+             "postuler", "candidature", "recherche", "stepstone", "recrutement"}
 
-    for part in parts:
+    for part in reversed(parts):  # Entreprise souvent en 2e ou 3e position
         clean = part.strip()
-        if (clean and len(clean) > 2 and len(clean) < 60
+        if (clean and 2 < len(clean) < 60
                 and clean.lower() not in noise
-                and not any(n in clean.lower() for n in ["stage ", "alternance ", "offre ", "emploi ", "recrute"])
-                and not clean[0].islower()):  # Les noms d'entreprise commencent en majuscule
-            entreprise = clean
-            # On prefere les parties du milieu/fin (souvent le nom d'entreprise)
+                and not any(n in clean.lower() for n in ["stage ", "alternance ", "offre ", "emploi "])
+                and clean[0].isupper()):
+            return clean
 
-    return entreprise
-
-
-def chercher_duckduckgo_jobs(mots_cles, region_label, types):
-    """Cherche sur DuckDuckGo pour trouver des offres sur tous les sites d'emploi"""
-    offres = []
-    entreprises_vues = set()
-
-    for t in types:
-        # Requetes ciblees sur les sites d'emploi
-        queries = [
-            f'{t} {mots_cles} {region_label} site:welcometothejungle.com',
-            f'{t} {mots_cles} {region_label} site:indeed.fr',
-            f'{t} {mots_cles} {region_label} site:hellowork.com',
-            f'{t} {mots_cles} {region_label} site:apec.fr',
-            f'{t} {mots_cles} {region_label} recrutement',
-            f'{t} {mots_cles} {region_label} postuler entreprise',
-            f'"{t}" "{mots_cles}" "{region_label}" contact email entreprise',
-        ]
-
-        for query in queries:
-            resultats = duckduckgo_search(query, max_results=15)
-            print(f"    [{t}] {len(resultats)} resultats pour : {query[:60]}...")
-
-            for r in resultats:
-                entreprise = extraire_entreprise_from_result(r)
-                if entreprise and entreprise.lower() not in entreprises_vues:
-                    entreprises_vues.add(entreprise.lower())
-
-                    url_ent = ""
-                    parsed = urlparse(r["url"])
-                    domain = (parsed.netloc or "").replace("www.", "")
-                    if domain and not any(jb in domain for jb in JOB_SITES):
-                        url_ent = f"https://{domain}"
-
-                    email = ""
-                    found = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', r["snippet"])
-                    for f in found:
-                        if is_valid_email(f):
-                            email = f.lower()
-                            break
-
-                    offres.append({
-                        "titre": r["titre"],
-                        "entreprise": entreprise,
-                        "url_entreprise": url_ent,
-                        "lieu": region_label,
-                        "email": email,
-                        "source": f"DuckDuckGo ({domain})",
-                    })
-
-            time.sleep(2)  # Respecter DuckDuckGo
-
-    return offres
+    return ""
 
 
 # ============================================================
-# SOURCE 3 : SCRAPING DIRECT (JSON-LD + HTML)
+# SOURCE 3 : SCRAPING DIRECT (JSON-LD)
 # ============================================================
 def scraper_site_direct(url, source_name):
-    """Scrape un site et extrait les JSON-LD JobPosting + HTML"""
     offres = []
     try:
         resp = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True)
         if resp.status_code != 200:
             return offres
-
         soup = BeautifulSoup(resp.text, "html.parser")
-
-        # JSON-LD
         scripts = soup.find_all("script", {"type": "application/ld+json"})
         for script in scripts:
             try:
@@ -309,61 +273,46 @@ def scraper_site_direct(url, source_name):
                     continue
                 data = json.loads(script.string)
                 items = data if isinstance(data, list) else [data]
-                # Aussi chercher dans @graph
                 for item in items:
                     if isinstance(item, dict) and "@graph" in item:
                         items.extend(item["@graph"])
-
                 for item in items:
-                    if not isinstance(item, dict):
-                        continue
-                    if item.get("@type") in ["JobPosting", "jobPosting"]:
+                    if isinstance(item, dict) and item.get("@type") in ["JobPosting", "jobPosting"]:
                         org = item.get("hiringOrganization", {})
                         if isinstance(org, dict) and org.get("name"):
                             offres.append({
                                 "titre": item.get("title", ""),
                                 "entreprise": org.get("name", ""),
                                 "url_entreprise": org.get("sameAs", "") or org.get("url", ""),
-                                "lieu": "",
-                                "email": "",
-                                "source": source_name,
+                                "lieu": "", "email": "", "source": source_name,
                             })
             except Exception:
                 pass
-
     except Exception:
         pass
     return offres
 
 
 def scraper_sites_directs(mots_cles, region_label, types):
-    """Scrape directement les sites d'emploi accessibles"""
     offres = []
     region_url = quote_plus(region_label)
-
     for t in types:
         q = quote_plus(f"{t} {mots_cles}")
         slug = f"{t}-{mots_cles}".replace(" ", "-").lower()
-
         urls = [
             (f"https://fr.indeed.com/jobs?q={q}&l={region_url}", "Indeed"),
             (f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q}&l={region_url}", "HelloWork"),
-            (f"https://www.welcometothejungle.com/fr/jobs?query={q}&refinementList%5Boffices.country_code%5D%5B%5D=FR", "WTTJ"),
-            (f"https://www.apec.fr/candidat/recherche-emploi.html/emploi?motsCles={q}&typeContrat=104437", "Apec"),
+            (f"https://www.welcometothejungle.com/fr/jobs?query={q}", "WTTJ"),
             (f"https://fr.talent.com/jobs?q={q}&l={region_url}", "Talent.com"),
             (f"https://fr.jooble.org/emploi-{slug}", "Jooble"),
             (f"https://www.optioncarriere.com/emploi?s={q}&l={region_url}", "OptionCarriere"),
-            (f"https://www.cadremploi.fr/emploi/liste_offres?motscles={q}", "Cadremploi"),
-            (f"https://www.glassdoor.fr/Emploi/{slug}-emplois-SRCH_KO0,{len(slug)}.htm", "Glassdoor"),
         ]
-
         for url, source in urls:
             site_offres = scraper_site_direct(url, source)
             if site_offres:
                 print(f"    [+] {source} : {len(site_offres)} offres")
                 offres.extend(site_offres)
-            time.sleep(1.5)
-
+            time.sleep(1)
     return offres
 
 
@@ -396,7 +345,7 @@ def extraire_domaine(url):
         parsed = urlparse(url if url.startswith("http") else f"http://{url}")
         domaine = parsed.netloc or parsed.path
         domaine = re.sub(r"^www\.", "", domaine)
-        ignore = JOB_SITES + ["francetravail.fr", "pole-emploi.fr", "google.com"]
+        ignore = JOB_SITES + ["francetravail.fr", "pole-emploi.fr", "google.com", "duckduckgo.com"]
         for ig in ignore:
             if ig in domaine:
                 return ""
@@ -414,6 +363,11 @@ def main():
     print("=" * 60)
     print(f"  {len(JOB_SITES)} sites d'emploi cibles")
     print("  Sources : France Travail + DuckDuckGo + Scraping + Hunter.io")
+
+    # Charger historique envois
+    emails_deja_envoyes = charger_emails_envoyes()
+    if emails_deja_envoyes:
+        print(f"  {len(emails_deja_envoyes)} emails deja contactes (seront exclus)")
 
     print()
     mots_cles = input("  Domaine (ex: developpeur informatique) : ").strip()
@@ -436,7 +390,7 @@ def main():
     # ======= COLLECTE =======
     print()
     print("  " + "=" * 50)
-    print("  COLLECTE (ca peut prendre 1-2 min, on cherche partout)")
+    print("  COLLECTE (ca peut prendre 1-2 min)")
     print("  " + "=" * 50)
 
     toutes_offres = []
@@ -450,14 +404,14 @@ def main():
             print(f"    -> {len(offres)} offres ({t})")
             toutes_offres.extend(offres)
 
-    # 2. DuckDuckGo (remplace Google qui bloque)
-    print(f"\n  [2/3] DuckDuckGo (sur {len(JOB_SITES)} sites d'emploi)...")
+    # 2. DuckDuckGo (lib python, pas de CAPTCHA)
+    print(f"\n  [2/3] DuckDuckGo Search...")
     offres_ddg = chercher_duckduckgo_jobs(mots_cles, region_label, types)
     print(f"    => {len(offres_ddg)} entreprises via DuckDuckGo")
     toutes_offres.extend(offres_ddg)
 
     # 3. Scraping direct
-    print(f"\n  [3/3] Scraping direct (9 sites)...")
+    print(f"\n  [3/3] Scraping direct (6 sites)...")
     offres_scraping = scraper_sites_directs(mots_cles, region_label, types)
     print(f"    => {len(offres_scraping)} offres via scraping")
     toutes_offres.extend(offres_scraping)
@@ -535,17 +489,23 @@ def main():
 
         print(f"    {hunter_calls} appels effectues")
 
+    # Filtrer les emails deja envoyes
+    nouveaux = [r for r in resultats if r["email"].lower() not in emails_deja_envoyes]
+    deja = len(resultats) - len(nouveaux)
+
     # ======= RESULTATS =======
     print()
     print("=" * 60)
-    print(f"  RESULTATS : {len(resultats)} emails trouves !")
+    print(f"  RESULTATS : {len(nouveaux)} nouveaux emails !")
+    if deja > 0:
+        print(f"  ({deja} deja contactes, exclus)")
     print("=" * 60)
 
-    if not resultats:
-        print("  [!] Aucun email trouve.")
+    if not nouveaux:
+        print("  [!] Aucun nouvel email. Tous deja contactes ou aucun trouve.")
         return
 
-    for i, r in enumerate(resultats, 1):
+    for i, r in enumerate(nouveaux, 1):
         print(f"\n  {i:3d}. {r['entreprise']}")
         print(f"       Email  : {r['email']}")
         print(f"       Poste  : {r['titre']}")
@@ -554,31 +514,35 @@ def main():
         print(f"       Source : {r['source']}")
 
     # CSV
-    fichier = os.path.join(os.path.dirname(os.path.abspath(__file__)), "emails_trouves.csv")
+    fichier = os.path.join(SCRIPT_DIR, "emails_trouves.csv")
     with open(fichier, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f, delimiter=";")
         w.writerow(["Email", "Entreprise", "Poste", "Lieu", "Source"])
-        for r in resultats:
+        for r in nouveaux:
             w.writerow([r["email"], r["entreprise"], r["titre"], r["lieu"], r["source"]])
 
     print(f"\n  [+] Sauvegarde dans emails_trouves.csv")
 
+    # Envoyer ?
     print()
     choix = input("  Envoyer ton mail a tous ces contacts ? (o/N) : ").strip().lower()
     if choix == "o":
         from config import MON_EMAIL, OBJET
         from envoyer import envoyer_mail
-        print(f"\n  [*] Envoi de {len(resultats)} mails...")
+        print(f"\n  [*] Envoi de {len(nouveaux)} mails...")
         ok = 0
-        for i, r in enumerate(resultats, 1):
-            print(f"  [{i}/{len(resultats)}] -> {r['email']} ({r['entreprise']})")
+        for i, r in enumerate(nouveaux, 1):
+            email = r["email"]
+            print(f"  [{i}/{len(nouveaux)}] -> {email} ({r['entreprise']})")
             try:
-                envoyer_mail(r["email"])
+                envoyer_mail(email)
+                sauver_email_envoye(email)
                 ok += 1
                 time.sleep(2)
             except Exception as e:
                 print(f"    [!] Echec : {e}")
-        print(f"\n  [+] {ok}/{len(resultats)} mails envoyes !")
+        print(f"\n  [+] {ok}/{len(nouveaux)} mails envoyes !")
+        print(f"  [+] Historique mis a jour dans emails_envoyes.txt")
 
 
 if __name__ == "__main__":

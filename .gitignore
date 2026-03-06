@@ -4,3 +4,4 @@ __pycache__/
 *.pyc
 Files/
 emails_trouves.csv
+emails_envoyes.txt

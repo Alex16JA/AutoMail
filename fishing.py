@@ -5,7 +5,7 @@ import os
 import re
 import sys
 import time
-from urllib.parse import urlparse, quote_plus
+from urllib.parse import urlparse, quote_plus, unquote
 from bs4 import BeautifulSoup
 from fishing_config import (
     FRANCE_TRAVAIL_CLIENT_ID,
@@ -17,76 +17,52 @@ HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
     "Accept-Language": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
-    "Accept-Encoding": "gzip, deflate, br",
-    "Referer": "https://www.google.com/",
     "DNT": "1",
 }
 
-# ============================================================
-# TOUS LES SITES D'EMPLOI CIBLES
-# ============================================================
 JOB_SITES = [
-    "indeed.fr",
-    "hellowork.com",
-    "welcometothejungle.com",
-    "linkedin.com/jobs",
-    "apec.fr",
-    "cadremploi.fr",
-    "monster.fr",
-    "meteojob.com",
-    "regionsjob.com",
-    "keljob.com",
-    "glassdoor.fr",
-    "lesjeudis.com",
-    "jobteaser.com",
-    "stepstone.fr",
-    "talent.com",
-    "jooble.org",
-    "optioncarriere.com",
-    "emploi.lefigaro.fr",
-    "letudiant.fr",
-    "studyrama-emploi.com",
-    "l4m.fr",
-    "directemploi.com",
-    "staffme.com",
-    "jobijoba.com",
-    "wizbii.com",
+    "indeed.fr", "hellowork.com", "welcometothejungle.com", "linkedin.com",
+    "apec.fr", "cadremploi.fr", "monster.fr", "meteojob.com", "regionsjob.com",
+    "keljob.com", "glassdoor.fr", "lesjeudis.com", "jobteaser.com", "stepstone.fr",
+    "talent.com", "jooble.org", "optioncarriere.com", "emploi.lefigaro.fr",
+    "letudiant.fr", "studyrama-emploi.com", "l4m.fr", "directemploi.com",
+    "staffme.com", "jobijoba.com", "wizbii.com",
 ]
 
-# ============================================================
-# REFERENTIELS REGIONS
-# ============================================================
 REGIONS = {
-    "ile-de-france": "11",
-    "auvergne-rhone-alpes": "84",
-    "bourgogne-franche-comte": "27",
-    "bretagne": "53",
-    "centre-val-de-loire": "24",
-    "corse": "94",
-    "grand-est": "44",
-    "hauts-de-france": "32",
-    "normandie": "28",
-    "nouvelle-aquitaine": "75",
-    "occitanie": "76",
-    "pays-de-la-loire": "52",
-    "provence-alpes-cote-d-azur": "93",
+    "ile-de-france": "11", "auvergne-rhone-alpes": "84", "bourgogne-franche-comte": "27",
+    "bretagne": "53", "centre-val-de-loire": "24", "corse": "94", "grand-est": "44",
+    "hauts-de-france": "32", "normandie": "28", "nouvelle-aquitaine": "75",
+    "occitanie": "76", "pays-de-la-loire": "52", "provence-alpes-cote-d-azur": "93",
 }
 
 REGIONS_LABEL = {
-    "ile-de-france": "Île-de-France",
-    "auvergne-rhone-alpes": "Auvergne-Rhône-Alpes",
-    "bourgogne-franche-comte": "Bourgogne-Franche-Comté",
-    "bretagne": "Bretagne",
-    "centre-val-de-loire": "Centre-Val de Loire",
-    "corse": "Corse",
-    "grand-est": "Grand Est",
-    "hauts-de-france": "Hauts-de-France",
-    "normandie": "Normandie",
-    "nouvelle-aquitaine": "Nouvelle-Aquitaine",
-    "occitanie": "Occitanie",
-    "pays-de-la-loire": "Pays de la Loire",
-    "provence-alpes-cote-d-azur": "Provence-Alpes-Côte d'Azur",
+    "ile-de-france": "Île-de-France", "auvergne-rhone-alpes": "Auvergne-Rhône-Alpes",
+    "bourgogne-franche-comte": "Bourgogne-Franche-Comté", "bretagne": "Bretagne",
+    "centre-val-de-loire": "Centre-Val de Loire", "corse": "Corse", "grand-est": "Grand Est",
+    "hauts-de-france": "Hauts-de-France", "normandie": "Normandie",
+    "nouvelle-aquitaine": "Nouvelle-Aquitaine", "occitanie": "Occitanie",
+    "pays-de-la-loire": "Pays de la Loire", "provence-alpes-cote-d-azur": "Provence-Alpes-Côte d'Azur",
 }
+
+
+# ============================================================
+# VALIDATION EMAIL
+# ============================================================
+def is_valid_email(email):
+    """Verifie qu'une string est bien un email valide"""
+    if not email or "@" not in email:
+        return False
+    # Doit matcher le format basique email
+    pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
+    if not re.match(pattern, email.strip()):
+        return False
+    # Rejeter les trucs qui sont clairement pas des emails
+    bad = ["francetravail.fr", "candidat.", "postuler", "lien", "http", "offres"]
+    for b in bad:
+        if b in email.lower():
+            return False
+    return True
 
 
 def afficher_regions():
@@ -149,11 +125,15 @@ def chercher_france_travail(token, mots_cles, region_code):
             contact = r.get("contact", {})
             email = ""
             if contact:
-                email = contact.get("courriel", "")
+                candidate = contact.get("courriel", "")
+                if is_valid_email(candidate):
+                    email = candidate
             if not email:
-                found = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', r.get("description", ""))
-                if found:
-                    email = found[0]
+                found = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', r.get("description", ""))
+                for f in found:
+                    if is_valid_email(f):
+                        email = f
+                        break
             offres.append({
                 "titre": r.get("intitule", ""),
                 "entreprise": ent.get("nom", ""),
@@ -169,125 +149,130 @@ def chercher_france_travail(token, mots_cles, region_code):
 
 
 # ============================================================
-# SOURCE 2 : GOOGLE SEARCH (cherche sur TOUS les job boards)
+# SOURCE 2 : DUCKDUCKGO (ne bloque pas comme Google)
 # ============================================================
-def google_search(query, num_pages=3):
-    """Scrape Google search results pour trouver des offres sur tous les sites d'emploi"""
+def duckduckgo_search(query, max_results=30):
+    """Cherche sur DuckDuckGo HTML (pas de CAPTCHA)"""
     resultats = []
+    url = f"https://html.duckduckgo.com/html/?q={quote_plus(query)}"
 
-    for page in range(num_pages):
-        start = page * 10
-        url = f"https://www.google.com/search?q={quote_plus(query)}&start={start}&hl=fr&gl=fr"
+    try:
+        resp = requests.get(url, headers={
+            "User-Agent": HEADERS["User-Agent"],
+            "Accept": "text/html",
+        }, timeout=15)
 
-        try:
-            resp = requests.get(url, headers=HEADERS, timeout=10)
-            if resp.status_code != 200:
+        if resp.status_code != 200:
+            return resultats
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+        # DuckDuckGo HTML results
+        for result in soup.find_all("div", class_="result"):
+            title_el = result.find("a", class_="result__a")
+            snippet_el = result.find("a", class_="result__snippet")
+
+            if not title_el:
                 continue
 
-            soup = BeautifulSoup(resp.text, "html.parser")
+            href = title_el.get("href", "")
+            # DuckDuckGo encode les URLs via redirect
+            if "uddg=" in href:
+                match = re.search(r'uddg=([^&]+)', href)
+                if match:
+                    href = unquote(match.group(1))
 
-            # Extraire les résultats de recherche
-            for div in soup.find_all("div", class_="g"):
-                lien = div.find("a", href=True)
-                titre_el = div.find("h3")
-                snippet_el = div.find("div", class_=re.compile("VwiC3b|IsZvec|s3v9rd"))
+            titre = title_el.get_text(strip=True)
+            snippet = snippet_el.get_text(strip=True) if snippet_el else ""
 
-                if not lien or not titre_el:
-                    continue
+            if href and titre:
+                resultats.append({"url": href, "titre": titre, "snippet": snippet})
 
-                href = lien["href"]
-                titre = titre_el.get_text(strip=True)
-                snippet = snippet_el.get_text(strip=True) if snippet_el else ""
+            if len(resultats) >= max_results:
+                break
 
-                resultats.append({
-                    "url": href,
-                    "titre": titre,
-                    "snippet": snippet,
-                })
-
-            time.sleep(2)  # Respecter Google
-        except Exception as e:
-            continue
+    except Exception as e:
+        print(f"    [!] Erreur DuckDuckGo : {e}")
 
     return resultats
 
 
-def extraire_entreprise_from_google(resultat):
-    """Essaie d'extraire le nom de l'entreprise depuis un résultat Google"""
+def extraire_entreprise_from_result(resultat):
+    """Extraire le nom de l'entreprise depuis un résultat de recherche"""
     titre = resultat["titre"]
     url = resultat["url"]
-    snippet = resultat["snippet"]
 
     entreprise = ""
 
-    # Patterns communs dans les titres d'offres
-    # "Stage Développeur - NomEntreprise - Paris"
-    # "NomEntreprise recrute un Stage Développeur"
-    # "Offre de stage chez NomEntreprise"
-
-    # Essayer d'extraire depuis le titre
-    patterns = [
-        r'(?:chez|at|@)\s+(.+?)(?:\s*[-|,]|$)',       # "chez NomEntreprise"
-        r'^(.+?)\s+(?:recrute|recherche|propose)',      # "NomEntreprise recrute"
-        r'[-|]\s*(.+?)\s*[-|]',                         # "Poste - Entreprise - Lieu"
-        r'[-|]\s*(.+?)$',                               # "Poste - Entreprise" (fin)
-    ]
-
-    for pattern in patterns:
-        match = re.search(pattern, titre, re.IGNORECASE)
-        if match:
-            candidate = match.group(1).strip()
-            # Filtrer les faux positifs
-            noise = ["indeed", "hellowork", "linkedin", "glassdoor", "apec",
-                     "monster", "cadremploi", "welcome to the jungle", "stage",
-                     "alternance", "emploi", "offre", "paris", "france",
-                     "ile-de-france", "île-de-france", "h/f", "f/h", "cdi", "cdd"]
-            if candidate.lower() not in noise and len(candidate) > 2 and len(candidate) < 50:
-                entreprise = candidate
-                break
-
-    # Essayer aussi depuis le domaine de welcometothejungle
-    if not entreprise and "welcometothejungle.com/fr/companies/" in url:
+    # WTTJ : /companies/nom-entreprise
+    if "welcometothejungle.com" in url:
         match = re.search(r'/companies/([^/]+)', url)
         if match:
-            entreprise = match.group(1).replace("-", " ").title()
+            return match.group(1).replace("-", " ").title()
+
+    # Patterns dans les titres
+    # "Poste - Entreprise - Lieu" ou "Poste | Entreprise"
+    parts = re.split(r'\s*[-|–—]\s*', titre)
+
+    # Filtrer les parties qui sont des noms de job boards ou des postes generiques
+    noise = {"indeed", "hellowork", "linkedin", "glassdoor", "apec", "monster",
+             "cadremploi", "welcome to the jungle", "meteojob", "talent.com",
+             "jooble", "optioncarriere", "keljob", "regionsjob", "jobijoba",
+             "stage", "alternance", "emploi", "offre", "offres", "paris",
+             "france", "ile de france", "h/f", "f/h", "cdi", "cdd", "recrutement",
+             "wizbii", "jobteaser", "directemploi", "studyrama", "letudiant",
+             "postuler", "candidature", "recherche", "stepstone"}
+
+    for part in parts:
+        clean = part.strip()
+        if (clean and len(clean) > 2 and len(clean) < 60
+                and clean.lower() not in noise
+                and not any(n in clean.lower() for n in ["stage ", "alternance ", "offre ", "emploi ", "recrute"])
+                and not clean[0].islower()):  # Les noms d'entreprise commencent en majuscule
+            entreprise = clean
+            # On prefere les parties du milieu/fin (souvent le nom d'entreprise)
 
     return entreprise
 
 
-def chercher_google_jobs(mots_cles, region_label, types):
-    """Utilise Google pour chercher des offres sur TOUS les sites d'emploi"""
+def chercher_duckduckgo_jobs(mots_cles, region_label, types):
+    """Cherche sur DuckDuckGo pour trouver des offres sur tous les sites d'emploi"""
     offres = []
-
-    # Construire les requêtes Google ciblées
-    sites_query = " OR ".join([f"site:{s}" for s in JOB_SITES[:10]])  # Top 10
+    entreprises_vues = set()
 
     for t in types:
+        # Requetes ciblees sur les sites d'emploi
         queries = [
-            f'{t} {mots_cles} {region_label} ({sites_query})',
-            f'{t} {mots_cles} {region_label} recrutement email',
-            f'{t} {mots_cles} {region_label} postuler',
+            f'{t} {mots_cles} {region_label} site:welcometothejungle.com',
+            f'{t} {mots_cles} {region_label} site:indeed.fr',
+            f'{t} {mots_cles} {region_label} site:hellowork.com',
+            f'{t} {mots_cles} {region_label} site:apec.fr',
+            f'{t} {mots_cles} {region_label} recrutement',
+            f'{t} {mots_cles} {region_label} postuler entreprise',
+            f'"{t}" "{mots_cles}" "{region_label}" contact email entreprise',
         ]
 
         for query in queries:
-            resultats = google_search(query, num_pages=2)
+            resultats = duckduckgo_search(query, max_results=15)
+            print(f"    [{t}] {len(resultats)} resultats pour : {query[:60]}...")
 
             for r in resultats:
-                entreprise = extraire_entreprise_from_google(r)
-                if entreprise:
-                    # Extraire le domaine du site de l'entreprise (pas du job board)
+                entreprise = extraire_entreprise_from_result(r)
+                if entreprise and entreprise.lower() not in entreprises_vues:
+                    entreprises_vues.add(entreprise.lower())
+
                     url_ent = ""
                     parsed = urlparse(r["url"])
-                    domain = parsed.netloc.replace("www.", "")
-                    # Si c'est un job board, pas besoin de garder l'URL
-                    if not any(jb in domain for jb in JOB_SITES):
+                    domain = (parsed.netloc or "").replace("www.", "")
+                    if domain and not any(jb in domain for jb in JOB_SITES):
                         url_ent = f"https://{domain}"
 
-                    # Chercher un email dans le snippet
                     email = ""
-                    found = re.findall(r'[\w.+-]+@[\w-]+\.[\w.-]+', r["snippet"])
-                    if found:
-                        email = found[0].lower()
+                    found = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', r["snippet"])
+                    for f in found:
+                        if is_valid_email(f):
+                            email = f.lower()
+                            break
 
                     offres.append({
                         "titre": r["titre"],
@@ -295,53 +280,51 @@ def chercher_google_jobs(mots_cles, region_label, types):
                         "url_entreprise": url_ent,
                         "lieu": region_label,
                         "email": email,
-                        "source": f"Google ({domain})",
+                        "source": f"DuckDuckGo ({domain})",
                     })
 
-            time.sleep(1)
+            time.sleep(2)  # Respecter DuckDuckGo
 
     return offres
 
 
 # ============================================================
-# SOURCE 3 : SCRAPING DIRECT des sites accessibles
+# SOURCE 3 : SCRAPING DIRECT (JSON-LD + HTML)
 # ============================================================
 def scraper_site_direct(url, source_name):
-    """Scrape un site directement et extrait les JSON-LD JobPosting"""
+    """Scrape un site et extrait les JSON-LD JobPosting + HTML"""
     offres = []
     try:
-        resp = requests.get(url, headers=HEADERS, timeout=10)
+        resp = requests.get(url, headers=HEADERS, timeout=10, allow_redirects=True)
         if resp.status_code != 200:
             return offres
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # Extraire JSON-LD (standard sur beaucoup de sites)
+        # JSON-LD
         scripts = soup.find_all("script", {"type": "application/ld+json"})
         for script in scripts:
             try:
+                if not script.string:
+                    continue
                 data = json.loads(script.string)
                 items = data if isinstance(data, list) else [data]
+                # Aussi chercher dans @graph
                 for item in items:
-                    if isinstance(item, dict) and item.get("@type") == "JobPosting":
+                    if isinstance(item, dict) and "@graph" in item:
+                        items.extend(item["@graph"])
+
+                for item in items:
+                    if not isinstance(item, dict):
+                        continue
+                    if item.get("@type") in ["JobPosting", "jobPosting"]:
                         org = item.get("hiringOrganization", {})
                         if isinstance(org, dict) and org.get("name"):
-                            loc = item.get("jobLocation", {})
-                            address = ""
-                            if isinstance(loc, dict):
-                                addr = loc.get("address", {})
-                                if isinstance(addr, dict):
-                                    address = addr.get("addressLocality", "")
-                                elif isinstance(loc, list) and loc:
-                                    addr = loc[0].get("address", {})
-                                    if isinstance(addr, dict):
-                                        address = addr.get("addressLocality", "")
-
                             offres.append({
                                 "titre": item.get("title", ""),
                                 "entreprise": org.get("name", ""),
                                 "url_entreprise": org.get("sameAs", "") or org.get("url", ""),
-                                "lieu": address,
+                                "lieu": "",
                                 "email": "",
                                 "source": source_name,
                             })
@@ -354,41 +337,32 @@ def scraper_site_direct(url, source_name):
 
 
 def scraper_sites_directs(mots_cles, region_label, types):
-    """Essaye de scraper directement plusieurs sites d'emploi"""
+    """Scrape directement les sites d'emploi accessibles"""
     offres = []
+    region_url = quote_plus(region_label)
 
     for t in types:
-        query = f"{t} {mots_cles}".replace(" ", "-").lower()
-        query_plus = f"{t} {mots_cles}".replace(" ", "+").lower()
-        query_encoded = quote_plus(f"{t} {mots_cles}")
-        region_url = region_label.lower().replace(" ", "-").replace("'", "").replace("é", "e").replace("î", "i").replace("ô", "o")
+        q = quote_plus(f"{t} {mots_cles}")
+        slug = f"{t}-{mots_cles}".replace(" ", "-").lower()
 
-        urls_to_try = [
-            # Indeed
-            (f"https://fr.indeed.com/jobs?q={query_encoded}&l={quote_plus(region_label)}", "Indeed"),
-            # HelloWork
-            (f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={query_encoded}&l={quote_plus(region_label)}", "HelloWork"),
-            # Cadremploi
-            (f"https://www.cadremploi.fr/emploi/liste_offres?motscles={query_encoded}&ville={quote_plus(region_label)}", "Cadremploi"),
-            # Monster
-            (f"https://www.monster.fr/emploi/recherche?q={query_encoded}&where={quote_plus(region_label)}", "Monster"),
-            # Meteojob
-            (f"https://www.meteojob.com/jobsearch/offers?what={query_encoded}&where={quote_plus(region_label)}", "Meteojob"),
-            # Talent.com
-            (f"https://fr.talent.com/jobs?q={query_encoded}&l={quote_plus(region_label)}", "Talent.com"),
-            # Glassdoor
-            (f"https://www.glassdoor.fr/Emploi/{query}-emplois-SRCH_KO0,{len(query)}.htm", "Glassdoor"),
-            # Jooble
-            (f"https://fr.jooble.org/emploi-{query}/{region_url}", "Jooble"),
-            # OptionCarriere
-            (f"https://www.optioncarriere.com/emploi?s={query_encoded}&l={quote_plus(region_label)}", "OptionCarriere"),
+        urls = [
+            (f"https://fr.indeed.com/jobs?q={q}&l={region_url}", "Indeed"),
+            (f"https://www.hellowork.com/fr-fr/emploi/recherche.html?k={q}&l={region_url}", "HelloWork"),
+            (f"https://www.welcometothejungle.com/fr/jobs?query={q}&refinementList%5Boffices.country_code%5D%5B%5D=FR", "WTTJ"),
+            (f"https://www.apec.fr/candidat/recherche-emploi.html/emploi?motsCles={q}&typeContrat=104437", "Apec"),
+            (f"https://fr.talent.com/jobs?q={q}&l={region_url}", "Talent.com"),
+            (f"https://fr.jooble.org/emploi-{slug}", "Jooble"),
+            (f"https://www.optioncarriere.com/emploi?s={q}&l={region_url}", "OptionCarriere"),
+            (f"https://www.cadremploi.fr/emploi/liste_offres?motscles={q}", "Cadremploi"),
+            (f"https://www.glassdoor.fr/Emploi/{slug}-emplois-SRCH_KO0,{len(slug)}.htm", "Glassdoor"),
         ]
 
-        for url, source in urls_to_try:
+        for url, source in urls:
             site_offres = scraper_site_direct(url, source)
             if site_offres:
+                print(f"    [+] {source} : {len(site_offres)} offres")
                 offres.extend(site_offres)
-            time.sleep(1)
+            time.sleep(1.5)
 
     return offres
 
@@ -409,7 +383,8 @@ def chercher_email_hunter(domaine=None, company=None):
     try:
         resp = requests.get("https://api.hunter.io/v2/domain-search", params=params, timeout=10)
         resp.raise_for_status()
-        return [e["value"] for e in resp.json().get("data", {}).get("emails", []) if e.get("confidence", 0) >= 20]
+        return [e["value"] for e in resp.json().get("data", {}).get("emails", [])
+                if e.get("confidence", 0) >= 20 and is_valid_email(e.get("value", ""))]
     except Exception:
         return []
 
@@ -421,12 +396,7 @@ def extraire_domaine(url):
         parsed = urlparse(url if url.startswith("http") else f"http://{url}")
         domaine = parsed.netloc or parsed.path
         domaine = re.sub(r"^www\.", "", domaine)
-        ignore = ["indeed.com", "indeed.fr", "hellowork.com", "welcometothejungle.com",
-                   "linkedin.com", "francetravail.fr", "pole-emploi.fr", "apec.fr",
-                   "cadremploi.fr", "monster.fr", "glassdoor.fr", "meteojob.com",
-                   "google.com", "jooble.org", "talent.com", "optioncarriere.com",
-                   "keljob.com", "regionsjob.com", "jobijoba.com", "wizbii.com",
-                   "directemploi.com", "staffme.com", "studyrama.com", "letudiant.fr"]
+        ignore = JOB_SITES + ["francetravail.fr", "pole-emploi.fr", "google.com"]
         for ig in ignore:
             if ig in domaine:
                 return ""
@@ -442,22 +412,19 @@ def main():
     print("=" * 60)
     print("  FISHING MAIL - Trouver les emails des recruteurs")
     print("=" * 60)
-    print(f"  {len(JOB_SITES)} sites d'emploi indexes")
-    print("  Sources : France Travail + Google + Scraping + Hunter.io")
+    print(f"  {len(JOB_SITES)} sites d'emploi cibles")
+    print("  Sources : France Travail + DuckDuckGo + Scraping + Hunter.io")
 
-    # Domaine
     print()
     mots_cles = input("  Domaine (ex: developpeur informatique) : ").strip()
     if not mots_cles:
         mots_cles = "developpeur informatique"
         print(f"  -> Par defaut : {mots_cles}")
 
-    # Region
     region_cle, region_code, region_nom = choisir_region()
     region_label = REGIONS_LABEL.get(region_cle, region_nom)
     print(f"  -> Region : {region_label}")
 
-    # Type
     print()
     print("  Type :")
     print("    1. Stage uniquement")
@@ -469,12 +436,12 @@ def main():
     # ======= COLLECTE =======
     print()
     print("  " + "=" * 50)
-    print("  COLLECTE DES OFFRES (patiente, ca cherche partout)")
+    print("  COLLECTE (ca peut prendre 1-2 min, on cherche partout)")
     print("  " + "=" * 50)
 
     toutes_offres = []
 
-    # 1. France Travail API
+    # 1. France Travail
     print("\n  [1/3] France Travail API...")
     token = get_france_travail_token()
     if token:
@@ -482,22 +449,20 @@ def main():
             offres = chercher_france_travail(token, f"{t} {mots_cles}", region_code)
             print(f"    -> {len(offres)} offres ({t})")
             toutes_offres.extend(offres)
-    else:
-        print("    -> Connexion echouee")
 
-    # 2. Google Search (cherche sur TOUS les sites d'emploi)
-    print(f"\n  [2/3] Google Search (sur {len(JOB_SITES)} sites d'emploi)...")
-    offres_google = chercher_google_jobs(mots_cles, region_label, types)
-    print(f"    -> {len(offres_google)} entreprises trouvees via Google")
-    toutes_offres.extend(offres_google)
+    # 2. DuckDuckGo (remplace Google qui bloque)
+    print(f"\n  [2/3] DuckDuckGo (sur {len(JOB_SITES)} sites d'emploi)...")
+    offres_ddg = chercher_duckduckgo_jobs(mots_cles, region_label, types)
+    print(f"    => {len(offres_ddg)} entreprises via DuckDuckGo")
+    toutes_offres.extend(offres_ddg)
 
-    # 3. Scraping direct des sites accessibles
+    # 3. Scraping direct
     print(f"\n  [3/3] Scraping direct (9 sites)...")
     offres_scraping = scraper_sites_directs(mots_cles, region_label, types)
-    print(f"    -> {len(offres_scraping)} offres via scraping direct")
+    print(f"    => {len(offres_scraping)} offres via scraping")
     toutes_offres.extend(offres_scraping)
 
-    # Dedup par nom d'entreprise
+    # Dedup
     vus = set()
     offres_uniques = []
     for o in toutes_offres:
@@ -506,7 +471,7 @@ def main():
             vus.add(nom)
             offres_uniques.append(o)
 
-    print(f"\n  => {len(offres_uniques)} entreprises uniques trouvees")
+    print(f"\n  => TOTAL : {len(offres_uniques)} entreprises uniques")
 
     if not offres_uniques:
         print("  [!] Aucune offre trouvee.")
@@ -523,10 +488,10 @@ def main():
     hunter_calls = 0
     MAX_HUNTER = 45
 
-    # Phase 1 : Emails deja trouves
+    # Phase 1
     offres_sans = []
     for o in offres_uniques:
-        if o["email"] and o["email"] not in emails_vus:
+        if o["email"] and is_valid_email(o["email"]) and o["email"] not in emails_vus:
             emails_vus.add(o["email"])
             resultats.append(o)
         else:
@@ -541,7 +506,7 @@ def main():
 
         for o in offres_sans:
             if hunter_calls >= MAX_HUNTER:
-                print(f"    [!] Limite credtis atteinte ({MAX_HUNTER})")
+                print(f"    [!] Limite credits atteinte ({MAX_HUNTER})")
                 break
 
             nom = o["entreprise"]
@@ -549,14 +514,10 @@ def main():
                 continue
 
             emails = []
-
-            # Par domaine
             dom = extraire_domaine(o["url_entreprise"])
             if dom:
                 emails = chercher_email_hunter(domaine=dom)
                 hunter_calls += 1
-
-            # Par nom
             if not emails:
                 emails = chercher_email_hunter(company=nom)
                 hunter_calls += 1
@@ -602,7 +563,6 @@ def main():
 
     print(f"\n  [+] Sauvegarde dans emails_trouves.csv")
 
-    # Envoyer ?
     print()
     choix = input("  Envoyer ton mail a tous ces contacts ? (o/N) : ").strip().lower()
     if choix == "o":

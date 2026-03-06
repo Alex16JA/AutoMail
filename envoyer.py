@@ -1,0 +1,74 @@
+import smtplib
+import os
+import sys
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
+from email.mime.base import MIMEBase
+from email import encoders
+from config import MON_EMAIL, MON_MOT_DE_PASSE, SMTP_SERVEUR, SMTP_PORT, OBJET, CONTENU, PIECES_JOINTES
+
+
+def envoyer_mail(destinataire):
+    msg = MIMEMultipart()
+    msg["From"] = MON_EMAIL
+    msg["To"] = destinataire
+    msg["Subject"] = OBJET
+
+    # Corps du mail
+    msg.attach(MIMEText(CONTENU, "plain"))
+
+    # Pieces jointes
+    for fichier in PIECES_JOINTES:
+        if not os.path.isfile(fichier):
+            print(f"  [!] Fichier introuvable, ignore : {fichier}")
+            continue
+        with open(fichier, "rb") as f:
+            part = MIMEBase("application", "octet-stream")
+            part.set_payload(f.read())
+        encoders.encode_base64(part)
+        nom_fichier = os.path.basename(fichier)
+        part.add_header("Content-Disposition", f"attachment; filename={nom_fichier}")
+        msg.attach(part)
+        print(f"  [+] Piece jointe : {nom_fichier}")
+
+    # Envoi
+    try:
+        server = smtplib.SMTP(SMTP_SERVEUR, SMTP_PORT)
+        server.starttls()
+        server.login(MON_EMAIL, MON_MOT_DE_PASSE)
+        server.send_message(msg)
+        server.quit()
+        print(f"\n  >>> Mail envoye a {destinataire} !\n")
+    except smtplib.SMTPAuthenticationError:
+        print("\n  [ERREUR] Authentification echouee.")
+        print("  Verifie ton email et mot de passe d'application dans config.py")
+        print("  Pour Gmail, genere un mot de passe ici : https://myaccount.google.com/apppasswords\n")
+    except Exception as e:
+        print(f"\n  [ERREUR] {e}\n")
+
+
+def main():
+    print("=" * 50)
+    print("  AUTOMAIL - Envoi rapide de mails")
+    print(f"  De : {MON_EMAIL}")
+    print(f"  Objet : {OBJET}")
+    print(f"  Pieces jointes : {len(PIECES_JOINTES)}")
+    print("=" * 50)
+    print()
+
+    while True:
+        destinataire = input("  Email du destinataire (ou 'q' pour quitter) : ").strip()
+
+        if destinataire.lower() == "q":
+            print("  Bye !")
+            break
+
+        if not destinataire or "@" not in destinataire:
+            print("  [!] Adresse mail invalide, reessaye.\n")
+            continue
+
+        envoyer_mail(destinataire)
+
+
+if __name__ == "__main__":
+    main()

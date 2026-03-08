@@ -157,6 +157,7 @@ def chercher_france_travail(token, mots_cles, region_code):
                 "url_entreprise": ent.get("url", ""),
                 "lieu": r.get("lieuTravail", {}).get("libelle", ""),
                 "email": email.strip().lower() if email else "",
+                "description": r.get("description", ""),
                 "source": "France Travail",
             })
         return offres
@@ -215,6 +216,7 @@ def chercher_duckduckgo_jobs(mots_cles, region_label, types):
                             "url_entreprise": url_ent,
                             "lieu": region_label,
                             "email": email,
+                            "description": snippet,
                             "source": f"DuckDuckGo ({domain})" if domain else "DuckDuckGo",
                         })
 
@@ -284,7 +286,9 @@ def scraper_site_direct(url, source_name):
                                 "titre": item.get("title", ""),
                                 "entreprise": org.get("name", ""),
                                 "url_entreprise": org.get("sameAs", "") or org.get("url", ""),
-                                "lieu": "", "email": "", "source": source_name,
+                                "lieu": "", "email": "",
+                                "description": item.get("description", ""),
+                                "source": source_name,
                             })
             except Exception:
                 pass
@@ -387,6 +391,13 @@ def main():
     choix = input("  Choix (1/2/3) [3] : ").strip() or "3"
     types = {"1": ["stage"], "2": ["alternance"], "3": ["stage", "alternance"]}.get(choix, ["stage", "alternance"])
 
+    # Filtres par mots-cles dans la description
+    print()
+    print("  Mots-cles a chercher dans les descriptions (optionnel)")
+    print("  Ex: angular, react, python, java")
+    filtres_input = input("  Mots-cles (vide = pas de filtre) : ").strip()
+    filtres = [f.strip().lower() for f in filtres_input.split(",") if f.strip()] if filtres_input else []
+
     # ======= COLLECTE =======
     print()
     print("  " + "=" * 50)
@@ -426,6 +437,19 @@ def main():
             offres_uniques.append(o)
 
     print(f"\n  => TOTAL : {len(offres_uniques)} entreprises uniques")
+
+    # Filtrage par mots-cles
+    if filtres:
+        avant = len(offres_uniques)
+        offres_filtrees = []
+        for o in offres_uniques:
+            texte = (o.get("titre", "") + " " + o.get("description", "")).lower()
+            mots_trouves = [f for f in filtres if f in texte]
+            if mots_trouves:
+                o["mots_trouves"] = mots_trouves
+                offres_filtrees.append(o)
+        offres_uniques = offres_filtrees
+        print(f"  => FILTRE : {len(offres_uniques)}/{avant} offres contiennent {filtres}")
 
     if not offres_uniques:
         print("  [!] Aucune offre trouvee.")
@@ -512,6 +536,8 @@ def main():
         if r["lieu"]:
             print(f"       Lieu   : {r['lieu']}")
         print(f"       Source : {r['source']}")
+        if r.get("mots_trouves"):
+            print(f"       Match  : {', '.join(r['mots_trouves'])}")
 
     # CSV
     fichier = os.path.join(SCRIPT_DIR, "emails_trouves.csv")

@@ -391,12 +391,12 @@ def main():
     choix = input("  Choix (1/2/3) [3] : ").strip() or "3"
     types = {"1": ["stage"], "2": ["alternance"], "3": ["stage", "alternance"]}.get(choix, ["stage", "alternance"])
 
-    # Filtres par mots-cles dans la description
+    # Mots-cles techniques pour elargir la recherche
     print()
-    print("  Mots-cles a chercher dans les descriptions (optionnel)")
-    print("  Ex: angular, react, python, java")
-    filtres_input = input("  Mots-cles (vide = pas de filtre) : ").strip()
-    filtres = [f.strip().lower() for f in filtres_input.split(",") if f.strip()] if filtres_input else []
+    print("  Mots-cles techniques (optionnel, pour elargir la recherche)")
+    print("  Ex: angular, react, python, java, devops")
+    kw_input = input("  Mots-cles (vide = recherche simple) : ").strip()
+    keywords = [k.strip() for k in kw_input.split(",") if k.strip()] if kw_input else []
 
     # ======= COLLECTE =======
     print()
@@ -406,20 +406,30 @@ def main():
 
     toutes_offres = []
 
+    # Construire toutes les combinaisons de recherche
+    recherches = [mots_cles]
+    for kw in keywords:
+        recherches.append(f"{mots_cles} {kw}")
+        recherches.append(kw)
+
     # 1. France Travail
     print("\n  [1/3] France Travail API...")
     token = get_france_travail_token()
     if token:
         for t in types:
-            offres = chercher_france_travail(token, f"{t} {mots_cles}", region_code)
-            print(f"    -> {len(offres)} offres ({t})")
-            toutes_offres.extend(offres)
+            for rech in recherches:
+                offres = chercher_france_travail(token, f"{t} {rech}", region_code)
+                if offres:
+                    print(f"    -> {len(offres)} offres ({t} + '{rech}')")
+                    toutes_offres.extend(offres)
 
-    # 2. DuckDuckGo (lib python, pas de CAPTCHA)
+    # 2. DuckDuckGo
     print(f"\n  [2/3] DuckDuckGo Search...")
-    offres_ddg = chercher_duckduckgo_jobs(mots_cles, region_label, types)
-    print(f"    => {len(offres_ddg)} entreprises via DuckDuckGo")
-    toutes_offres.extend(offres_ddg)
+    for rech in recherches:
+        offres_ddg = chercher_duckduckgo_jobs(rech, region_label, types)
+        if offres_ddg:
+            print(f"    => {len(offres_ddg)} entreprises ('{rech}')")
+            toutes_offres.extend(offres_ddg)
 
     # 3. Scraping direct
     print(f"\n  [3/3] Scraping direct (6 sites)...")
@@ -437,19 +447,6 @@ def main():
             offres_uniques.append(o)
 
     print(f"\n  => TOTAL : {len(offres_uniques)} entreprises uniques")
-
-    # Filtrage par mots-cles
-    if filtres:
-        avant = len(offres_uniques)
-        offres_filtrees = []
-        for o in offres_uniques:
-            texte = (o.get("titre", "") + " " + o.get("description", "")).lower()
-            mots_trouves = [f for f in filtres if f in texte]
-            if mots_trouves:
-                o["mots_trouves"] = mots_trouves
-                offres_filtrees.append(o)
-        offres_uniques = offres_filtrees
-        print(f"  => FILTRE : {len(offres_uniques)}/{avant} offres contiennent {filtres}")
 
     if not offres_uniques:
         print("  [!] Aucune offre trouvee.")
@@ -536,8 +533,6 @@ def main():
         if r["lieu"]:
             print(f"       Lieu   : {r['lieu']}")
         print(f"       Source : {r['source']}")
-        if r.get("mots_trouves"):
-            print(f"       Match  : {', '.join(r['mots_trouves'])}")
 
     # CSV
     fichier = os.path.join(SCRIPT_DIR, "emails_trouves.csv")

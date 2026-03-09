@@ -8,7 +8,7 @@ import time
 import smtplib
 import socket
 import dns.resolver
-from datetime import datetime
+from datetime import datetime, timedelta
 from urllib.parse import urlparse, quote_plus
 from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
@@ -83,6 +83,62 @@ CODES_NAF_INFO = [
 
 # Prefixes email à deviner
 EMAIL_PREFIXES = ["contact", "rh", "recrutement", "info", "stage", "emploi", "candidature", "careers", "jobs", "hr"]
+
+# Synonymes pour elargir la recherche automatiquement
+SYNONYMES = {
+    "informatique": ["developpeur", "développeur", "IT", "digital", "numerique", "logiciel", "software", "web"],
+    "developpeur": ["developer", "développeur", "programmeur", "dev", "software engineer"],
+    "web": ["frontend", "backend", "fullstack", "full-stack", "site internet"],
+    "reseau": ["réseau", "network", "systeme", "système", "admin sys", "sysadmin"],
+    "data": ["donnees", "données", "big data", "data analyst", "data engineer", "BI"],
+    "cybersecurite": ["cybersécurité", "securite informatique", "sécurité", "pentest", "SOC"],
+    "devops": ["cloud", "infrastructure", "CI/CD", "docker", "kubernetes"],
+    "mobile": ["android", "ios", "flutter", "react native", "application mobile"],
+}
+
+# Codes ROME pour informatique (La Bonne Alternance)
+ROME_CODES_INFO = [
+    "M1805",  # Développement informatique
+    "M1802",  # Expertise et support technique
+    "M1801",  # Administration systèmes
+    "M1803",  # Direction des SI
+    "M1806",  # Conseil et maîtrise d'ouvrage en SI
+    "M1810",  # Production et exploitation SI
+]
+
+# Coordonnées des régions (pour La Bonne Alternance)
+REGION_COORDS = {
+    "ile-de-france": (48.8566, 2.3522),
+    "auvergne-rhone-alpes": (45.7640, 4.8357),
+    "bretagne": (48.1173, -1.6778),
+    "hauts-de-france": (50.6292, 3.0573),
+    "grand-est": (48.5734, 7.7521),
+    "normandie": (49.1829, -0.3707),
+    "nouvelle-aquitaine": (44.8378, -0.5792),
+    "occitanie": (43.6047, 1.4442),
+    "pays-de-la-loire": (47.2184, -1.5536),
+    "provence-alpes-cote-d-azur": (43.2965, 5.3698),
+    "bourgogne-franche-comte": (47.3220, 5.0415),
+    "centre-val-de-loire": (47.3941, 0.6848),
+    "corse": (42.1500, 9.1039),
+}
+
+# Codes INSEE pour La Bonne Alternance
+REGION_INSEE = {
+    "ile-de-france": "75056",
+    "auvergne-rhone-alpes": "69123",
+    "bretagne": "35238",
+    "hauts-de-france": "59350",
+    "grand-est": "67482",
+    "normandie": "14118",
+    "nouvelle-aquitaine": "33063",
+    "occitanie": "31555",
+    "pays-de-la-loire": "44109",
+    "provence-alpes-cote-d-azur": "13055",
+    "bourgogne-franche-comte": "21231",
+    "centre-val-de-loire": "37261",
+    "corse": "2A004",
+}
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SENT_FILE = os.path.join(SCRIPT_DIR, "emails_envoyes.json")
@@ -613,6 +669,116 @@ def extraire_domaine(url):
         return ""
 
 
+def generer_synonymes(mots_cles):
+    """Génère des variations de recherche à partir des synonymes"""
+    variations = set()
+    mots = mots_cles.lower().split()
+    for mot in mots:
+        if mot in SYNONYMES:
+            for syn in SYNONYMES[mot]:
+                variations.add(syn)
+    return list(variations)
+
+
+def verifier_emails_valides(resultats):
+    """Vérifie que les emails sont valides via MX lookup avant envoi"""
+    valides = []
+    invalides = 0
+    domaines_verifies = {}  # Cache
+
+    for r in resultats:
+        email = r["email"]
+        domaine = email.split("@")[1] if "@" in email else ""
+
+        if domaine in domaines_verifies:
+            if domaines_verifies[domaine]:
+                valides.append(r)
+            else:
+                invalides += 1
+            continue
+
+        try:
+            dns.resolver.resolve(domaine, 'MX')
+            domaines_verifies[domaine] = True
+            valides.append(r)
+        except Exception:
+            domaines_verifies[domaine] = False
+            invalides += 1
+
+    return valides, invalides
+
+
+# ============================================================
+# SOURCE 5 : LA BONNE ALTERNANCE (API gouv spéciale stages)
+# ============================================================
+def chercher_la_bonne_alternance(region_cle, types):
+    """Cherche des entreprises via La Bonne Alternance API"""
+    coords = REGION_COORDS.get(region_cle, (48.8566, 2.3522))
+    insee = REGION_INSEE.get(region_cle, "75056")
+    romes = ",".join(ROME_CODES_INFO)
+
+    offres = []
+    entreprises_vues = set()
+
+    try:
+        url = f"https://labonnealternance.apprentissage.beta.gouv.fr/api/v1/jobsEtFormations"
+        params = {
+            "romes": romes,
+            "latitude": coords[0],
+            "longitude": coords[1],
+            "radius": 50,
+            "caller": "automail",
+            "insee": insee,
+            "sources": "lba,offres",
+        }
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code != 200:
+            print(f"    [!] API LBA : HTTP {resp.status_code}")
+            return offres
+
+        data = resp.json()
+
+        # Traiter les jobs (offres et entreprises à potentiel)
+        jobs = data.get("jobs") or {}
+        if isinstance(jobs, dict):
+            for source_key in ["lpiAffichables", "peJobs", "matchas"]:
+                items = jobs.get(source_key, []) or []
+                for item in items:
+                    company = item.get("company", {}) or {}
+                    nom = company.get("name", "")
+                    if nom and nom.lower() not in entreprises_vues:
+                        entreprises_vues.add(nom.lower())
+                        offres.append({
+                            "titre": item.get("title", "") or "Candidature spontanée - Stage IT",
+                            "entreprise": nom,
+                            "url_entreprise": company.get("url", "") or "",
+                            "lieu": item.get("place", {}).get("city", "") or "",
+                            "email": "",
+                            "description": "",
+                            "source": "La Bonne Alternance",
+                        })
+        elif isinstance(jobs, list):
+            for item in jobs:
+                company = item.get("company", {}) or {}
+                nom = company.get("name", "")
+                if nom and nom.lower() not in entreprises_vues:
+                    entreprises_vues.add(nom.lower())
+                    offres.append({
+                        "titre": item.get("title", "") or "Candidature spontanée - Stage IT",
+                        "entreprise": nom,
+                        "url_entreprise": company.get("url", "") or "",
+                        "lieu": item.get("place", {}).get("city", "") or "",
+                        "email": "",
+                        "description": "",
+                        "source": "La Bonne Alternance",
+                    })
+
+    except Exception as e:
+        print(f"    [!] Erreur LBA : {e}")
+
+    return offres
+
+
 # ============================================================
 # MAIN
 # ============================================================
@@ -685,6 +851,13 @@ def main():
         recherches.append(f"{mots_cles} {kw}")
         recherches.append(kw)
 
+    # Ajouter les synonymes automatiquement
+    synonymes = generer_synonymes(mots_cles)
+    if synonymes:
+        print(f"\n  [+] Synonymes ajoutes : {', '.join(synonymes[:8])}")
+        for syn in synonymes[:5]:  # Top 5 synonymes
+            recherches.append(f"{syn}")
+
     # ---- Mode 1 & 3: Offres d'emploi classiques ----
     if mode in ["1", "3"]:
         # 1. France Travail
@@ -722,6 +895,12 @@ def main():
         offres_annuaire = chercher_annuaire_entreprises(departements, max_par_dept=10000)
         print(f"    => {len(offres_annuaire)} entreprises IT trouvees")
         toutes_offres.extend(offres_annuaire)
+
+    # ---- La Bonne Alternance (toujours) ----
+    print(f"\n  [LBA] La Bonne Alternance API...")
+    offres_lba = chercher_la_bonne_alternance(region_cle, types)
+    print(f"    => {len(offres_lba)} entreprises via La Bonne Alternance")
+    toutes_offres.extend(offres_lba)
 
     # Dedup par nom d'entreprise
     vus = set()
@@ -891,10 +1070,18 @@ def main():
     nouveaux = [r for r in resultats if r["email"].lower() not in emails_deja_envoyes]
     deja = len(resultats) - len(nouveaux)
 
+    # Phase 5 : Vérification des emails
+    if nouveaux:
+        print(f"\n  Phase 5 - Verification des emails ({len(nouveaux)} emails)...")
+        nouveaux, invalides = verifier_emails_valides(nouveaux)
+        if invalides > 0:
+            print(f"    {invalides} emails invalides retires (domaine inexistant)")
+        print(f"    {len(nouveaux)} emails verifies OK")
+
     # ======= RESULTATS =======
     print()
     print("=" * 60)
-    print(f"  RESULTATS : {len(nouveaux)} nouveaux contacts !")
+    print(f"  RESULTATS : {len(nouveaux)} nouveaux contacts verifies !")
     if deja > 0:
         print(f"  ({deja} deja contactes, exclus)")
     print("=" * 60)
@@ -922,7 +1109,31 @@ def main():
 
         # ======= ENVOYER =======
         print()
-        choix_envoi = input("  Envoyer ton mail a tous ces contacts ? (o/N) : ").strip().lower()
+        choix_envoi = input("  Envoyer ton mail a tous ces contacts ? (o/N/d=differe 8h) : ").strip().lower()
+
+        if choix_envoi == "d":
+            # Envoi différé à 8h du matin
+            now = datetime.now()
+            if now.hour >= 8 and now.hour < 18:
+                print("  [*] Il est deja l'heure de bureau, envoi maintenant...")
+                choix_envoi = "o"
+            else:
+                if now.hour >= 18:
+                    demain_8h = now.replace(hour=8, minute=0, second=0) + timedelta(days=1)
+                else:
+                    demain_8h = now.replace(hour=8, minute=0, second=0)
+                attente = (demain_8h - now).total_seconds()
+                print(f"  [*] Envoi programme a 8h00 ({demain_8h.strftime('%d/%m/%Y %H:%M')})")
+                print(f"      Attente : {int(attente // 3600)}h{int((attente % 3600) // 60):02d}min")
+                print(f"      (Laisse le terminal ouvert, ou Ctrl+C pour annuler)")
+                try:
+                    time.sleep(attente)
+                    choix_envoi = "o"
+                    print("\n  [*] 8h00 ! Lancement de l'envoi...")
+                except KeyboardInterrupt:
+                    print("\n  [!] Envoi annule.")
+                    choix_envoi = ""
+
         if choix_envoi == "o":
             from envoyer import envoyer_mail
             print(f"\n  [*] Envoi de {len(nouveaux)} mails personnalises...")

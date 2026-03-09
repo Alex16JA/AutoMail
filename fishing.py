@@ -411,6 +411,8 @@ def chercher_france_travail(token, mots_cles, region_code):
                 "source": "France Travail",
             })
         return offres
+    except json.JSONDecodeError:
+        return []  # Reponse vide = pas de resultats, normal
     except Exception as e:
         print(f"    [!] Erreur : {e}")
         return []

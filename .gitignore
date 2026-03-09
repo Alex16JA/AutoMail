@@ -5,3 +5,4 @@ __pycache__/
 Files/
 emails_trouves.csv
 emails_envoyes.txt
+emails_envoyes.json

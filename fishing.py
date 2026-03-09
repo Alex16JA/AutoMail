@@ -85,22 +85,79 @@ CODES_NAF_INFO = [
 EMAIL_PREFIXES = ["contact", "rh", "recrutement", "info", "stage", "emploi", "candidature", "careers", "jobs", "hr"]
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SENT_FILE = os.path.join(SCRIPT_DIR, "emails_envoyes.txt")
+SENT_FILE = os.path.join(SCRIPT_DIR, "emails_envoyes.json")
+RELANCE_JOURS = 7  # Nombre de jours avant relance
 
 
 # ============================================================
-# TRACKING EMAILS ENVOYES
+# TRACKING EMAILS ENVOYES (JSON avec dates)
 # ============================================================
 def charger_emails_envoyes():
+    """Charge le dictionnaire {email: {date, entreprise, relance}}"""
     if not os.path.exists(SENT_FILE):
-        return set()
-    with open(SENT_FILE, "r", encoding="utf-8") as f:
-        return set(line.strip().lower() for line in f if line.strip())
+        return {}
+    try:
+        with open(SENT_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return {}
 
 
-def sauver_email_envoye(email):
-    with open(SENT_FILE, "a", encoding="utf-8") as f:
-        f.write(email.strip().lower() + "\n")
+def sauver_emails_envoyes(data):
+    with open(SENT_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2, ensure_ascii=False)
+
+
+def sauver_email_envoye(email, entreprise="", est_relance=False):
+    data = charger_emails_envoyes()
+    email_lower = email.strip().lower()
+    if email_lower in data:
+        data[email_lower]["relance"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+        data[email_lower]["nb_relances"] = data[email_lower].get("nb_relances", 0) + 1
+    else:
+        data[email_lower] = {
+            "date": datetime.now().strftime("%Y-%m-%d %H:%M"),
+            "entreprise": entreprise,
+            "relance": None,
+            "nb_relances": 0,
+        }
+    sauver_emails_envoyes(data)
+
+
+def get_emails_a_relancer():
+    """Trouve les emails envoyés il y a plus de RELANCE_JOURS jours sans relance"""
+    data = charger_emails_envoyes()
+    a_relancer = []
+    now = datetime.now()
+    for email, info in data.items():
+        if info.get("nb_relances", 0) >= 2:
+            continue  # Max 2 relances
+        date_envoi = datetime.strptime(info["date"], "%Y-%m-%d %H:%M")
+        jours = (now - date_envoi).days
+        if jours >= RELANCE_JOURS:
+            dernier = info.get("relance")
+            if dernier:
+                date_relance = datetime.strptime(dernier, "%Y-%m-%d %H:%M")
+                jours_relance = (now - date_relance).days
+                if jours_relance < RELANCE_JOURS:
+                    continue
+            a_relancer.append({"email": email, "entreprise": info.get("entreprise", ""), "jours": jours})
+    return a_relancer
+
+
+def migrer_ancien_format():
+    """Migre l'ancien emails_envoyes.txt vers le nouveau format JSON"""
+    ancien = os.path.join(SCRIPT_DIR, "emails_envoyes.txt")
+    if os.path.exists(ancien) and not os.path.exists(SENT_FILE):
+        print("  [*] Migration emails_envoyes.txt -> .json...")
+        data = {}
+        with open(ancien, "r", encoding="utf-8") as f:
+            for line in f:
+                email = line.strip().lower()
+                if email:
+                    data[email] = {"date": "2026-03-06 00:00", "entreprise": "", "relance": None, "nb_relances": 0}
+        sauver_emails_envoyes(data)
+        print(f"    {len(data)} emails migres")
 
 
 # ============================================================
@@ -161,6 +218,59 @@ def trouver_email_par_domaine(domaine):
 
     # Sinon retourner contact@ par défaut (le plus universel)
     return f"contact@{domaine}"
+
+
+# ============================================================
+# SCRAPING SITE WEB ENTREPRISE (trouver email sur page contact)
+# ============================================================
+def chercher_site_web_entreprise(nom_entreprise):
+    """Cherche le site web d'une entreprise via DuckDuckGo"""
+    try:
+        with DDGS() as ddgs:
+            results = list(ddgs.text(f"{nom_entreprise} site officiel", region="fr-fr", max_results=5))
+        for r in results:
+            url = r.get("href", "")
+            parsed = urlparse(url)
+            domain = (parsed.netloc or "").replace("www.", "").lower()
+            # Ignorer les sites d'emploi et les annuaires
+            ignore = JOB_SITES + ["societe.com", "pappers.fr", "verif.com", "infogreffe.fr",
+                                  "wikipedia.org", "facebook.com", "twitter.com", "youtube.com",
+                                  "google.com", "pagesjaunes.fr", "duckduckgo.com", "kompass.com"]
+            if domain and not any(ig in domain for ig in ignore) and "." in domain:
+                return domain
+    except Exception:
+        pass
+    return ""
+
+
+def scraper_emails_site_web(domaine):
+    """Scrape le site web d'une entreprise pour trouver des emails"""
+    emails_trouves = set()
+    pages_a_tester = [
+        f"https://www.{domaine}",
+        f"https://www.{domaine}/contact",
+        f"https://www.{domaine}/contact/",
+        f"https://www.{domaine}/nous-contacter",
+        f"https://www.{domaine}/contactez-nous",
+        f"https://www.{domaine}/recrutement",
+        f"https://www.{domaine}/carrieres",
+        f"https://www.{domaine}/jobs",
+        f"https://{domaine}",
+        f"https://{domaine}/contact",
+    ]
+
+    for url in pages_a_tester:
+        try:
+            resp = requests.get(url, headers=HEADERS, timeout=5, allow_redirects=True)
+            if resp.status_code == 200:
+                found = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', resp.text)
+                for email in found:
+                    if is_valid_email(email) and domaine.split(".")[0] in email.lower():
+                        emails_trouves.add(email.lower())
+        except Exception:
+            pass
+
+    return list(emails_trouves)
 
 
 # ============================================================
@@ -511,12 +621,20 @@ def main():
     print("  AUTOMAIL - Fishing & Candidatures automatiques")
     print("=" * 60)
     print(f"  {len(JOB_SITES)} sites d'emploi + Annuaire Entreprises gouv.fr")
-    print("  Sources : France Travail + DuckDuckGo + Scraping + Annuaire + Hunter.io")
+    print("  Sources : France Travail + DuckDuckGo + Scraping + Sites web + Annuaire + Hunter.io")
+
+    # Migrer ancien format si besoin
+    migrer_ancien_format()
 
     # Charger historique envois
     emails_deja_envoyes = charger_emails_envoyes()
     if emails_deja_envoyes:
         print(f"  {len(emails_deja_envoyes)} emails deja contactes (seront exclus)")
+
+    # Relances a faire ?
+    a_relancer = get_emails_a_relancer()
+    if a_relancer:
+        print(f"  {len(a_relancer)} relances a faire (> {RELANCE_JOURS} jours sans reponse)")
 
     # ======= MODE =======
     print()
@@ -703,12 +821,42 @@ def main():
                             print(f"    [+] {nom} -> {best}")
                     time.sleep(0.4)
 
-    # Phase 3 : Email guessing pour les entreprises de l'annuaire
+    # Phase 3 : Chercher domaine + scraper site web
     offres_encore_sans = [o for o in offres_sans if o["email"] == "" and o not in resultats]
-    annuaire_sans = [o for o in offres_encore_sans if o["source"] == "Annuaire Entreprises (gouv.fr)"]
+
+    if offres_encore_sans:
+        print(f"  Phase 3 - Scraping sites web ({min(len(offres_encore_sans), 50)} entreprises)...")
+        scraped = 0
+        for o in offres_encore_sans[:50]:  # Limiter pour pas que ca prenne 3h
+            nom = o["entreprise"]
+            dom = extraire_domaine(o.get("url_entreprise", ""))
+
+            # Si pas de domaine, chercher via DuckDuckGo
+            if not dom:
+                dom = chercher_site_web_entreprise(nom)
+                time.sleep(0.5)
+
+            if dom:
+                # Scraper le site web pour emails
+                emails_site = scraper_emails_site_web(dom)
+                if emails_site:
+                    best = emails_site[0]
+                    if best not in emails_vus:
+                        emails_vus.add(best)
+                        o["email"] = best
+                        o["source"] += " + Site web"
+                        resultats.append(o)
+                        scraped += 1
+                        print(f"    [+] {nom} -> {best} (site web)")
+
+        print(f"    {scraped} emails trouves via scraping de sites web")
+
+    # Phase 4 : Email guessing MX pour les restants
+    offres_encore_sans2 = [o for o in offres_sans if o["email"] == "" and o not in resultats]
+    annuaire_sans = [o for o in offres_encore_sans2 if o["source"] == "Annuaire Entreprises (gouv.fr)"]
 
     if annuaire_sans:
-        print(f"  Phase 3 - Email guessing ({len(annuaire_sans)} entreprises)...")
+        print(f"  Phase 4 - Email guessing MX ({len(annuaire_sans)} entreprises)...")
         guessed = 0
         for o in annuaire_sans:
             nom = o["entreprise"]
@@ -723,18 +871,16 @@ def main():
                 test_domain = domaine_guess + ext
                 email_guess = f"contact@{test_domain}"
 
-                # Vérifier si le domaine a des enregistrements MX
                 try:
                     dns.resolver.resolve(test_domain, 'MX')
-                    # Le domaine existe ! Utiliser contact@
                     if email_guess not in emails_vus:
                         emails_vus.add(email_guess)
                         o["email"] = email_guess
                         o["source"] += " + Guess"
                         resultats.append(o)
                         guessed += 1
-                        if guessed % 10 == 0:
-                            print(f"    ... {guessed} emails devinés")
+                        if guessed % 20 == 0:
+                            print(f"    ... {guessed} emails devines")
                     break
                 except Exception:
                     continue
@@ -755,59 +901,113 @@ def main():
 
     if not nouveaux:
         print("  [!] Aucun nouvel email.")
-        return
-
-    for i, r in enumerate(nouveaux, 1):
-        print(f"\n  {i:3d}. {r['entreprise']}")
-        print(f"       Email  : {r['email']}")
-        print(f"       Poste  : {r['titre']}")
-        if r["lieu"]:
-            print(f"       Lieu   : {r['lieu']}")
-        print(f"       Source : {r['source']}")
-
-    # CSV
-    fichier = os.path.join(SCRIPT_DIR, "emails_trouves.csv")
-    with open(fichier, "w", newline="", encoding="utf-8") as f:
-        w = csv.writer(f, delimiter=";")
-        w.writerow(["Email", "Entreprise", "Poste", "Lieu", "Source"])
-        for r in nouveaux:
-            w.writerow([r["email"], r["entreprise"], r["titre"], r["lieu"], r["source"]])
-
-    print(f"\n  [+] Sauvegarde dans emails_trouves.csv")
-
-    # ======= ENVOYER =======
-    print()
-    choix = input("  Envoyer ton mail a tous ces contacts ? (o/N) : ").strip().lower()
-    if choix == "o":
-        from envoyer import envoyer_mail
-        print(f"\n  [*] Envoi de {len(nouveaux)} mails personnalises...")
-        ok = 0
+    else:
         for i, r in enumerate(nouveaux, 1):
-            email = r["email"]
-            entreprise = r["entreprise"]
-            poste = r["titre"]
-            print(f"  [{i}/{len(nouveaux)}] -> {email} ({entreprise})")
-            try:
-                envoyer_mail(email, entreprise=entreprise, poste=poste)
-                sauver_email_envoye(email)
-                ok += 1
-                time.sleep(2)
-            except Exception as e:
-                print(f"    [!] Echec : {e}")
-        print(f"\n  [+] {ok}/{len(nouveaux)} mails envoyes !")
-        print(f"  [+] Historique mis a jour dans emails_envoyes.txt")
+            print(f"\n  {i:3d}. {r['entreprise']}")
+            print(f"       Email  : {r['email']}")
+            print(f"       Poste  : {r['titre']}")
+            if r["lieu"]:
+                print(f"       Lieu   : {r['lieu']}")
+            print(f"       Source : {r['source']}")
+
+        # CSV
+        fichier = os.path.join(SCRIPT_DIR, "emails_trouves.csv")
+        with open(fichier, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f, delimiter=";")
+            w.writerow(["Email", "Entreprise", "Poste", "Lieu", "Source"])
+            for r in nouveaux:
+                w.writerow([r["email"], r["entreprise"], r["titre"], r["lieu"], r["source"]])
+
+        print(f"\n  [+] Sauvegarde dans emails_trouves.csv")
+
+        # ======= ENVOYER =======
+        print()
+        choix_envoi = input("  Envoyer ton mail a tous ces contacts ? (o/N) : ").strip().lower()
+        if choix_envoi == "o":
+            from envoyer import envoyer_mail
+            print(f"\n  [*] Envoi de {len(nouveaux)} mails personnalises...")
+            ok = 0
+            for i, r in enumerate(nouveaux, 1):
+                email = r["email"]
+                entreprise = r["entreprise"]
+                poste = r["titre"]
+                print(f"  [{i}/{len(nouveaux)}] -> {email} ({entreprise})")
+                try:
+                    envoyer_mail(email, entreprise=entreprise, poste=poste)
+                    sauver_email_envoye(email, entreprise=entreprise)
+                    ok += 1
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"    [!] Echec : {e}")
+            print(f"\n  [+] {ok}/{len(nouveaux)} mails envoyes !")
+            print(f"  [+] Historique mis a jour dans emails_envoyes.json")
+
+    # ======= RELANCES =======
+    if a_relancer:
+        print()
+        print("=" * 60)
+        print(f"  RELANCES : {len(a_relancer)} emails sans reponse depuis {RELANCE_JOURS}+ jours")
+        print("=" * 60)
+
+        for r in a_relancer[:10]:
+            print(f"    {r['entreprise'] or r['email']} ({r['jours']} jours)")
+        if len(a_relancer) > 10:
+            print(f"    ... et {len(a_relancer) - 10} autres")
+
+        choix_relance = input("\n  Envoyer les relances ? (o/N) : ").strip().lower()
+        if choix_relance == "o":
+            from envoyer import envoyer_mail
+            from config import CONTENU
+
+            relance_contenu = """Madame, Monsieur,
+
+Je me permets de revenir vers vous suite a mon precedent mail concernant ma recherche de stage en informatique.
+
+N'ayant pas eu de retour de votre part, je souhaitais renouveler mon interet pour un eventuel stage au sein de {entreprise}.
+
+Vous trouverez toujours en piece jointe mon CV et ma lettre de motivation.
+
+Je reste a votre entiere disposition pour tout renseignement complementaire.
+
+Cordialement"""
+
+            print(f"\n  [*] Envoi de {len(a_relancer)} relances...")
+            ok_rel = 0
+            for i, r in enumerate(a_relancer, 1):
+                email = r["email"]
+                entreprise = r.get("entreprise", "")
+                print(f"  [{i}/{len(a_relancer)}] Relance -> {email}")
+                try:
+                    # Temporairement overrider le contenu pour la relance
+                    import config
+                    old_contenu = config.CONTENU
+                    old_objet = config.OBJET
+                    config.CONTENU = relance_contenu.replace("{entreprise}", entreprise) if entreprise else relance_contenu.replace("{entreprise}", "votre entreprise")
+                    config.OBJET = f"Relance - {old_objet}"
+                    envoyer_mail(email, entreprise=entreprise)
+                    config.CONTENU = old_contenu
+                    config.OBJET = old_objet
+                    sauver_email_envoye(email, entreprise=entreprise, est_relance=True)
+                    ok_rel += 1
+                    time.sleep(2)
+                except Exception as e:
+                    print(f"    [!] Echec : {e}")
+            print(f"\n  [+] {ok_rel}/{len(a_relancer)} relances envoyees !")
 
     # Stats finales
     print()
     print("  " + "-" * 40)
-    print(f"  STATS : {len(nouveaux)} contacts trouves")
-    sources = {}
-    for r in nouveaux:
-        src = r["source"].split(" + ")[0]
-        sources[src] = sources.get(src, 0) + 1
-    for src, nb in sorted(sources.items(), key=lambda x: x[1], reverse=True):
-        print(f"    {src:30s} : {nb}")
-    print(f"  Total emails deja envoyes : {len(emails_deja_envoyes) + (ok if choix == 'o' else 0)}")
+    all_data = charger_emails_envoyes()
+    print(f"  STATS")
+    print(f"    Nouveaux contacts trouves : {len(nouveaux)}")
+    print(f"    Total emails envoyes      : {len(all_data)}")
+    if nouveaux:
+        sources = {}
+        for r in nouveaux:
+            src = r["source"].split(" + ")[0]
+            sources[src] = sources.get(src, 0) + 1
+        for src, nb in sorted(sources.items(), key=lambda x: x[1], reverse=True):
+            print(f"    {src:30s} : {nb}")
 
 
 if __name__ == "__main__":

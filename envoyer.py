@@ -8,14 +8,29 @@ from email import encoders
 from config import MON_EMAIL, MON_MOT_DE_PASSE, SMTP_SERVEUR, SMTP_PORT, OBJET, CONTENU, PIECES_JOINTES
 
 
-def envoyer_mail(destinataire):
+def envoyer_mail(destinataire, entreprise="", poste=""):
+    """Envoie un mail avec personnalisation optionnelle.
+    
+    Les variables {entreprise}, {poste} sont remplacees dans l'objet et le contenu.
+    """
+    # Personnaliser le contenu
+    objet = OBJET
+    contenu = CONTENU
+
+    if entreprise:
+        objet = objet.replace("{entreprise}", entreprise)
+        contenu = contenu.replace("{entreprise}", entreprise)
+    if poste:
+        objet = objet.replace("{poste}", poste)
+        contenu = contenu.replace("{poste}", poste)
+
     msg = MIMEMultipart()
     msg["From"] = MON_EMAIL
     msg["To"] = destinataire
-    msg["Subject"] = OBJET
+    msg["Subject"] = objet
 
     # Corps du mail
-    msg.attach(MIMEText(CONTENU, "plain"))
+    msg.attach(MIMEText(contenu, "plain"))
 
     # Pieces jointes
     for fichier in PIECES_JOINTES:

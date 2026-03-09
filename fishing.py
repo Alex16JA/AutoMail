@@ -5,6 +5,10 @@ import os
 import re
 import sys
 import time
+import smtplib
+import socket
+import dns.resolver
+from datetime import datetime
 from urllib.parse import urlparse, quote_plus
 from bs4 import BeautifulSoup
 from duckduckgo_search import DDGS
@@ -45,6 +49,41 @@ REGIONS_LABEL = {
     "pays-de-la-loire": "Pays de la Loire", "provence-alpes-cote-d-azur": "Provence-Alpes-Côte d'Azur",
 }
 
+# Départements par région (pour la recherche multi-département)
+REGION_DEPARTEMENTS = {
+    "ile-de-france": ["75", "77", "78", "91", "92", "93", "94", "95"],
+    "auvergne-rhone-alpes": ["01", "03", "07", "15", "26", "38", "42", "43", "63", "69", "73", "74"],
+    "bretagne": ["22", "29", "35", "56"],
+    "hauts-de-france": ["02", "59", "60", "62", "80"],
+    "grand-est": ["08", "10", "51", "52", "54", "55", "57", "67", "68", "88"],
+    "normandie": ["14", "27", "50", "61", "76"],
+    "nouvelle-aquitaine": ["16", "17", "19", "23", "24", "33", "40", "47", "64", "79", "86", "87"],
+    "occitanie": ["09", "11", "12", "30", "31", "32", "34", "46", "48", "65", "66", "81", "82"],
+    "pays-de-la-loire": ["44", "49", "53", "72", "85"],
+    "provence-alpes-cote-d-azur": ["04", "05", "06", "13", "83", "84"],
+    "bourgogne-franche-comte": ["21", "25", "39", "58", "70", "71", "89", "90"],
+    "centre-val-de-loire": ["18", "28", "36", "37", "41", "45"],
+    "corse": ["2A", "2B"],
+}
+
+# Codes NAF pour les entreprises informatiques
+CODES_NAF_INFO = [
+    "62.01Z",  # Programmation informatique
+    "62.02A",  # Conseil en systèmes informatiques
+    "62.02B",  # Tierce maintenance informatique
+    "62.03Z",  # Gestion d'installations informatiques
+    "62.09Z",  # Autres activités informatiques
+    "63.11Z",  # Traitement de données, hébergement
+    "63.12Z",  # Portails internet
+    "58.21Z",  # Edition de jeux electroniques
+    "58.29A",  # Edition de logiciels système
+    "58.29B",  # Edition de logiciels outils
+    "58.29C",  # Edition de logiciels applicatifs
+]
+
+# Prefixes email à deviner
+EMAIL_PREFIXES = ["contact", "rh", "recrutement", "info", "stage", "emploi", "candidature", "careers", "jobs", "hr"]
+
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SENT_FILE = os.path.join(SCRIPT_DIR, "emails_envoyes.txt")
 
@@ -53,7 +92,6 @@ SENT_FILE = os.path.join(SCRIPT_DIR, "emails_envoyes.txt")
 # TRACKING EMAILS ENVOYES
 # ============================================================
 def charger_emails_envoyes():
-    """Charge la liste des emails deja envoyes"""
     if not os.path.exists(SENT_FILE):
         return set()
     with open(SENT_FILE, "r", encoding="utf-8") as f:
@@ -61,7 +99,6 @@ def charger_emails_envoyes():
 
 
 def sauver_email_envoye(email):
-    """Ajoute un email a la liste des envoyes"""
     with open(SENT_FILE, "a", encoding="utf-8") as f:
         f.write(email.strip().lower() + "\n")
 
@@ -75,13 +112,60 @@ def is_valid_email(email):
     pattern = r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$'
     if not re.match(pattern, email.strip()):
         return False
-    bad = ["francetravail.fr", "candidat.", "postuler", "lien", "http", "offres", "example."]
+    bad = ["francetravail.fr", "candidat.", "postuler", "lien", "http", "offres", "example.", "test@", "noreply", "no-reply", "mailer-daemon"]
     for b in bad:
         if b in email.lower():
             return False
     return True
 
 
+# ============================================================
+# EMAIL GUESSING - Deviner les emails à partir du domaine
+# ============================================================
+def deviner_emails(domaine):
+    """Génère des emails probables pour un domaine donné"""
+    if not domaine:
+        return []
+    return [f"{prefix}@{domaine}" for prefix in EMAIL_PREFIXES]
+
+
+def verifier_email_smtp(email):
+    """Vérifie si un email existe via SMTP (rapide, pas toujours fiable)"""
+    try:
+        domaine = email.split("@")[1]
+        # Résoudre le MX
+        mx_records = dns.resolver.resolve(domaine, 'MX')
+        mx_host = str(mx_records[0].exchange).rstrip('.')
+
+        # Connexion SMTP
+        server = smtplib.SMTP(timeout=5)
+        server.connect(mx_host, 25)
+        server.helo("automail.local")
+        server.mail("test@automail.local")
+        code, _ = server.rcpt(email)
+        server.quit()
+
+        return code == 250
+    except Exception:
+        return False  # En cas de timeout ou erreur, on considère que ça existe pas
+
+
+def trouver_email_par_domaine(domaine):
+    """Essaie de trouver un email valide pour un domaine"""
+    emails_a_tester = deviner_emails(domaine)
+
+    # D'abord essayer les plus courants avec vérification SMTP
+    for email in emails_a_tester[:4]:  # contact, rh, recrutement, info
+        if verifier_email_smtp(email):
+            return email
+
+    # Sinon retourner contact@ par défaut (le plus universel)
+    return f"contact@{domaine}"
+
+
+# ============================================================
+# UI HELPERS
+# ============================================================
 def afficher_regions():
     print("\n  Regions disponibles :")
     for i, nom in enumerate(REGIONS.keys(), 1):
@@ -157,6 +241,7 @@ def chercher_france_travail(token, mots_cles, region_code):
                 "url_entreprise": ent.get("url", ""),
                 "lieu": r.get("lieuTravail", {}).get("libelle", ""),
                 "email": email.strip().lower() if email else "",
+                "description": r.get("description", ""),
                 "source": "France Travail",
             })
         return offres
@@ -166,10 +251,9 @@ def chercher_france_travail(token, mots_cles, region_code):
 
 
 # ============================================================
-# SOURCE 2 : DUCKDUCKGO (via lib python - bypass CAPTCHA)
+# SOURCE 2 : DUCKDUCKGO
 # ============================================================
 def chercher_duckduckgo_jobs(mots_cles, region_label, types):
-    """Cherche sur DuckDuckGo via la lib python (contourne les CAPTCHA)"""
     offres = []
     entreprises_vues = set()
 
@@ -179,64 +263,47 @@ def chercher_duckduckgo_jobs(mots_cles, region_label, types):
             f'{t} {mots_cles} {region_label} recrutement',
             f'{t} {mots_cles} {region_label} offre emploi entreprise',
         ]
-
         for query in queries:
             try:
                 with DDGS() as ddgs:
                     results = list(ddgs.text(query, region="fr-fr", max_results=20))
-
                 print(f"    [{t}] {len(results)} resultats pour : {query[:55]}...")
-
                 for r in results:
                     url = r.get("href", "")
                     titre = r.get("title", "")
                     snippet = r.get("body", "")
-
                     entreprise = extraire_entreprise_from_result(titre, url)
                     if entreprise and entreprise.lower() not in entreprises_vues:
                         entreprises_vues.add(entreprise.lower())
-
                         url_ent = ""
                         parsed = urlparse(url)
                         domain = (parsed.netloc or "").replace("www.", "")
                         if domain and not any(jb in domain for jb in JOB_SITES):
                             url_ent = f"https://{domain}"
-
                         email = ""
                         found = re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', snippet)
                         for f in found:
                             if is_valid_email(f):
                                 email = f.lower()
                                 break
-
                         offres.append({
-                            "titre": titre,
-                            "entreprise": entreprise,
-                            "url_entreprise": url_ent,
-                            "lieu": region_label,
-                            "email": email,
+                            "titre": titre, "entreprise": entreprise,
+                            "url_entreprise": url_ent, "lieu": region_label,
+                            "email": email, "description": snippet,
                             "source": f"DuckDuckGo ({domain})" if domain else "DuckDuckGo",
                         })
-
             except Exception as e:
                 print(f"    [!] Erreur DDG : {e}")
-
             time.sleep(1)
-
     return offres
 
 
 def extraire_entreprise_from_result(titre, url):
-    """Extrait le nom d'entreprise depuis un résultat de recherche"""
-    # WTTJ
     if "welcometothejungle.com" in url:
         match = re.search(r'/companies/([^/]+)', url)
         if match:
             return match.group(1).replace("-", " ").title()
-
-    # Patterns dans les titres : "Poste - Entreprise - Lieu"
     parts = re.split(r'\s*[-|–—]\s*', titre)
-
     noise = {"indeed", "hellowork", "linkedin", "glassdoor", "apec", "monster",
              "cadremploi", "welcome to the jungle", "meteojob", "talent.com",
              "jooble", "optioncarriere", "keljob", "regionsjob", "jobijoba",
@@ -244,15 +311,13 @@ def extraire_entreprise_from_result(titre, url):
              "france", "ile de france", "île de france", "h/f", "f/h", "cdi", "cdd",
              "wizbii", "jobteaser", "directemploi", "studyrama", "letudiant",
              "postuler", "candidature", "recherche", "stepstone", "recrutement"}
-
-    for part in reversed(parts):  # Entreprise souvent en 2e ou 3e position
+    for part in reversed(parts):
         clean = part.strip()
         if (clean and 2 < len(clean) < 60
                 and clean.lower() not in noise
                 and not any(n in clean.lower() for n in ["stage ", "alternance ", "offre ", "emploi "])
                 and clean[0].isupper()):
             return clean
-
     return ""
 
 
@@ -284,7 +349,9 @@ def scraper_site_direct(url, source_name):
                                 "titre": item.get("title", ""),
                                 "entreprise": org.get("name", ""),
                                 "url_entreprise": org.get("sameAs", "") or org.get("url", ""),
-                                "lieu": "", "email": "", "source": source_name,
+                                "lieu": "", "email": "",
+                                "description": item.get("description", ""),
+                                "source": source_name,
                             })
             except Exception:
                 pass
@@ -317,6 +384,72 @@ def scraper_sites_directs(mots_cles, region_label, types):
 
 
 # ============================================================
+# SOURCE 4 : ANNUAIRE ENTREPRISES (API GOUVERNEMENT)
+# ============================================================
+def chercher_annuaire_entreprises(departements, max_par_dept=200):
+    """Cherche des entreprises IT via l'API gouv (gratuit, sans clé)"""
+    entreprises = []
+    naf_str = ",".join(CODES_NAF_INFO)
+
+    for dept in departements:
+        page = 1
+        count = 0
+        while count < max_par_dept:
+            try:
+                per_page = min(25, max_par_dept - count)
+                url = f"https://recherche-entreprises.api.gouv.fr/search?activite_principale={naf_str}&departement={dept}&page={page}&per_page={per_page}"
+                resp = requests.get(url, timeout=10)
+                if resp.status_code != 200:
+                    break
+
+                data = resp.json()
+                results = data.get("results", [])
+                if not results:
+                    break
+
+                for r in results:
+                    nom = r.get("nom_complet", "") or r.get("nom_raison_sociale", "")
+                    if not nom or len(nom) <= 2:
+                        continue
+
+                    # Chercher le siège
+                    siege = r.get("siege", {})
+                    # Extraire le domaine du site web si disponible
+                    domaine = ""
+                    # L'API ne donne pas toujours le site web, on récupère ce qu'on peut
+                    matching = r.get("matching_etablissements", [])
+                    adresse = siege.get("adresse", "") or siege.get("geo_adresse", "")
+                    commune = siege.get("libelle_commune", "")
+
+                    entreprises.append({
+                        "titre": "Candidature spontanée - Stage informatique",
+                        "entreprise": nom.strip(),
+                        "url_entreprise": "",
+                        "lieu": f"{dept} - {commune}" if commune else f"Dept {dept}",
+                        "email": "",
+                        "description": "",
+                        "source": "Annuaire Entreprises (gouv.fr)",
+                        "siren": r.get("siren", ""),
+                    })
+
+                count += len(results)
+                page += 1
+
+                if count >= data.get("total_results", 0):
+                    break
+
+                time.sleep(0.3)
+
+            except Exception as e:
+                print(f"    [!] Erreur annuaire dept {dept} : {e}")
+                break
+
+        print(f"    [{dept}] {count} entreprises IT trouvees")
+
+    return entreprises
+
+
+# ============================================================
 # HUNTER.IO
 # ============================================================
 def chercher_email_hunter(domaine=None, company=None):
@@ -332,10 +465,26 @@ def chercher_email_hunter(domaine=None, company=None):
     try:
         resp = requests.get("https://api.hunter.io/v2/domain-search", params=params, timeout=10)
         resp.raise_for_status()
-        return [e["value"] for e in resp.json().get("data", {}).get("emails", [])
-                if e.get("confidence", 0) >= 20 and is_valid_email(e.get("value", ""))]
+        data = resp.json().get("data", {})
+        emails = [e["value"] for e in data.get("emails", [])
+                  if e.get("confidence", 0) >= 20 and is_valid_email(e.get("value", ""))]
+        # Aussi récupérer le domaine si trouvé
+        return emails
     except Exception:
         return []
+
+
+def chercher_domaine_hunter(company):
+    """Cherche le domaine d'une entreprise via Hunter.io"""
+    if not HUNTER_API_KEY or HUNTER_API_KEY == "TA_CLE_HUNTER":
+        return ""
+    try:
+        resp = requests.get("https://api.hunter.io/v2/domain-search",
+                            params={"api_key": HUNTER_API_KEY, "company": company, "limit": 1}, timeout=10)
+        resp.raise_for_status()
+        return resp.json().get("data", {}).get("domain", "")
+    except Exception:
+        return ""
 
 
 def extraire_domaine(url):
@@ -359,26 +508,37 @@ def extraire_domaine(url):
 # ============================================================
 def main():
     print("=" * 60)
-    print("  FISHING MAIL - Trouver les emails des recruteurs")
+    print("  AUTOMAIL - Fishing & Candidatures automatiques")
     print("=" * 60)
-    print(f"  {len(JOB_SITES)} sites d'emploi cibles")
-    print("  Sources : France Travail + DuckDuckGo + Scraping + Hunter.io")
+    print(f"  {len(JOB_SITES)} sites d'emploi + Annuaire Entreprises gouv.fr")
+    print("  Sources : France Travail + DuckDuckGo + Scraping + Annuaire + Hunter.io")
 
     # Charger historique envois
     emails_deja_envoyes = charger_emails_envoyes()
     if emails_deja_envoyes:
         print(f"  {len(emails_deja_envoyes)} emails deja contactes (seront exclus)")
 
+    # ======= MODE =======
+    print()
+    print("  MODE :")
+    print("    1. Offres d'emploi (France Travail + sites d'emploi)")
+    print("    2. Candidatures spontanees (TOUTES les boites IT de la region)")
+    print("    3. Les deux (maximum de resultats)")
+    mode = input("  Choix (1/2/3) [3] : ").strip() or "3"
+
+    # Domaine
     print()
     mots_cles = input("  Domaine (ex: developpeur informatique) : ").strip()
     if not mots_cles:
-        mots_cles = "developpeur informatique"
+        mots_cles = "informatique"
         print(f"  -> Par defaut : {mots_cles}")
 
+    # Region
     region_cle, region_code, region_nom = choisir_region()
     region_label = REGIONS_LABEL.get(region_cle, region_nom)
     print(f"  -> Region : {region_label}")
 
+    # Type
     print()
     print("  Type :")
     print("    1. Stage uniquement")
@@ -387,36 +547,74 @@ def main():
     choix = input("  Choix (1/2/3) [3] : ").strip() or "3"
     types = {"1": ["stage"], "2": ["alternance"], "3": ["stage", "alternance"]}.get(choix, ["stage", "alternance"])
 
+    # Mots-cles techniques
+    print()
+    print("  Mots-cles techniques (optionnel, pour elargir)")
+    print("  Ex: angular, react, python, java, devops")
+    kw_input = input("  Mots-cles (vide = recherche simple) : ").strip()
+    keywords = [k.strip() for k in kw_input.split(",") if k.strip()] if kw_input else []
+
+    # Nombre max pour candidatures spontanees
+    max_spontanee = 100
+    if mode in ["2", "3"]:
+        print()
+        max_input = input("  Nombre max d'entreprises a contacter via annuaire [100] : ").strip()
+        if max_input.isdigit():
+            max_spontanee = int(max_input)
+
     # ======= COLLECTE =======
     print()
     print("  " + "=" * 50)
-    print("  COLLECTE (ca peut prendre 1-2 min)")
+    print("  COLLECTE (ca peut prendre quelques minutes)")
     print("  " + "=" * 50)
 
     toutes_offres = []
+    recherches = [mots_cles]
+    for kw in keywords:
+        recherches.append(f"{mots_cles} {kw}")
+        recherches.append(kw)
 
-    # 1. France Travail
-    print("\n  [1/3] France Travail API...")
-    token = get_france_travail_token()
-    if token:
-        for t in types:
-            offres = chercher_france_travail(token, f"{t} {mots_cles}", region_code)
-            print(f"    -> {len(offres)} offres ({t})")
-            toutes_offres.extend(offres)
+    # ---- Mode 1 & 3: Offres d'emploi classiques ----
+    if mode in ["1", "3"]:
+        # 1. France Travail
+        print("\n  [OFFRES] France Travail API...")
+        token = get_france_travail_token()
+        if token:
+            for t in types:
+                for rech in recherches:
+                    offres = chercher_france_travail(token, f"{t} {rech}", region_code)
+                    if offres:
+                        print(f"    -> {len(offres)} offres ({t} + '{rech}')")
+                        toutes_offres.extend(offres)
 
-    # 2. DuckDuckGo (lib python, pas de CAPTCHA)
-    print(f"\n  [2/3] DuckDuckGo Search...")
-    offres_ddg = chercher_duckduckgo_jobs(mots_cles, region_label, types)
-    print(f"    => {len(offres_ddg)} entreprises via DuckDuckGo")
-    toutes_offres.extend(offres_ddg)
+        # 2. DuckDuckGo
+        print(f"\n  [OFFRES] DuckDuckGo Search...")
+        for rech in recherches:
+            offres_ddg = chercher_duckduckgo_jobs(rech, region_label, types)
+            if offres_ddg:
+                print(f"    => {len(offres_ddg)} entreprises ('{rech}')")
+                toutes_offres.extend(offres_ddg)
 
-    # 3. Scraping direct
-    print(f"\n  [3/3] Scraping direct (6 sites)...")
-    offres_scraping = scraper_sites_directs(mots_cles, region_label, types)
-    print(f"    => {len(offres_scraping)} offres via scraping")
-    toutes_offres.extend(offres_scraping)
+        # 3. Scraping direct
+        print(f"\n  [OFFRES] Scraping direct (6 sites)...")
+        offres_scraping = scraper_sites_directs(mots_cles, region_label, types)
+        print(f"    => {len(offres_scraping)} offres via scraping")
+        toutes_offres.extend(offres_scraping)
 
-    # Dedup
+    # ---- Mode 2 & 3: Candidatures spontanées ----
+    if mode in ["2", "3"]:
+        departements = REGION_DEPARTEMENTS.get(region_cle, [])
+        if not departements:
+            departements = ["75"]  # Par defaut Paris
+
+        max_per_dept = max(10, max_spontanee // len(departements))
+
+        print(f"\n  [SPONTANE] Annuaire Entreprises ({len(departements)} departements)...")
+        offres_annuaire = chercher_annuaire_entreprises(departements, max_par_dept=max_per_dept)
+        print(f"    => {len(offres_annuaire)} entreprises IT trouvees")
+        toutes_offres.extend(offres_annuaire)
+
+    # Dedup par nom d'entreprise
     vus = set()
     offres_uniques = []
     for o in toutes_offres:
@@ -428,7 +626,7 @@ def main():
     print(f"\n  => TOTAL : {len(offres_uniques)} entreprises uniques")
 
     if not offres_uniques:
-        print("  [!] Aucune offre trouvee.")
+        print("  [!] Aucune entreprise trouvee.")
         return
 
     # ======= EMAILS =======
@@ -442,7 +640,7 @@ def main():
     hunter_calls = 0
     MAX_HUNTER = 45
 
-    # Phase 1
+    # Phase 1 : Emails déjà dans les offres
     offres_sans = []
     for o in offres_uniques:
         if o["email"] and is_valid_email(o["email"]) and o["email"] not in emails_vus:
@@ -453,56 +651,119 @@ def main():
 
     print(f"\n  Phase 1 - Emails dans les offres : {len(resultats)}")
 
-    # Phase 2 : Hunter.io
+    # Phase 2 : Hunter.io (pour les entreprises importantes)
     if HUNTER_API_KEY and HUNTER_API_KEY != "TA_CLE_HUNTER":
-        nb = min(len(offres_sans), MAX_HUNTER)
-        print(f"  Phase 2 - Hunter.io ({nb} entreprises)...")
+        # Prioriser les offres des job boards (plus pertinentes)
+        offres_prioritaires = [o for o in offres_sans if o["source"] != "Annuaire Entreprises (gouv.fr)"]
+        offres_annuaire_sans = [o for o in offres_sans if o["source"] == "Annuaire Entreprises (gouv.fr)"]
 
-        for o in offres_sans:
-            if hunter_calls >= MAX_HUNTER:
-                print(f"    [!] Limite credits atteinte ({MAX_HUNTER})")
-                break
+        nb = min(len(offres_prioritaires), MAX_HUNTER)
+        if nb > 0:
+            print(f"  Phase 2 - Hunter.io ({nb} entreprises prioritaires)...")
 
+            for o in offres_prioritaires:
+                if hunter_calls >= MAX_HUNTER:
+                    break
+
+                nom = o["entreprise"]
+                if not nom or len(nom) <= 1:
+                    continue
+
+                emails = []
+                dom = extraire_domaine(o["url_entreprise"])
+                if dom:
+                    emails = chercher_email_hunter(domaine=dom)
+                    hunter_calls += 1
+                if not emails:
+                    emails = chercher_email_hunter(company=nom)
+                    hunter_calls += 1
+
+                if emails:
+                    best = emails[0]
+                    if best not in emails_vus:
+                        emails_vus.add(best)
+                        o["email"] = best
+                        o["source"] += " + Hunter.io"
+                        resultats.append(o)
+                        print(f"    [+] {nom} -> {best}")
+
+                time.sleep(0.4)
+
+            print(f"    {hunter_calls} appels effectues")
+
+        # Phase 2b : Hunter.io pour annuaire (trouver domaine + email)
+        remaining_hunter = MAX_HUNTER - hunter_calls
+        if remaining_hunter > 0 and offres_annuaire_sans:
+            nb2 = min(len(offres_annuaire_sans), remaining_hunter // 2)
+            if nb2 > 0:
+                print(f"  Phase 2b - Hunter.io pour annuaire ({nb2} entreprises)...")
+                for o in offres_annuaire_sans[:nb2]:
+                    nom = o["entreprise"]
+                    emails = chercher_email_hunter(company=nom)
+                    hunter_calls += 1
+
+                    if emails:
+                        best = emails[0]
+                        if best not in emails_vus:
+                            emails_vus.add(best)
+                            o["email"] = best
+                            o["source"] += " + Hunter.io"
+                            resultats.append(o)
+                            print(f"    [+] {nom} -> {best}")
+                    time.sleep(0.4)
+
+    # Phase 3 : Email guessing pour les entreprises de l'annuaire
+    offres_encore_sans = [o for o in offres_sans if o["email"] == "" and o not in resultats]
+    annuaire_sans = [o for o in offres_encore_sans if o["source"] == "Annuaire Entreprises (gouv.fr)"]
+
+    if annuaire_sans:
+        print(f"  Phase 3 - Email guessing ({len(annuaire_sans)} entreprises)...")
+        guessed = 0
+        for o in annuaire_sans:
             nom = o["entreprise"]
-            if not nom or len(nom) <= 1:
+            # Construire un domaine probable
+            domaine_guess = nom.lower().replace(" ", "").replace("'", "").replace("-", "")
+            domaine_guess = re.sub(r'[^a-z0-9]', '', domaine_guess)
+            if len(domaine_guess) < 3:
                 continue
 
-            emails = []
-            dom = extraire_domaine(o["url_entreprise"])
-            if dom:
-                emails = chercher_email_hunter(domaine=dom)
-                hunter_calls += 1
-            if not emails:
-                emails = chercher_email_hunter(company=nom)
-                hunter_calls += 1
+            # Essayer domaine.fr et domaine.com
+            for ext in [".fr", ".com"]:
+                test_domain = domaine_guess + ext
+                email_guess = f"contact@{test_domain}"
 
-            if emails:
-                best = emails[0]
-                if best not in emails_vus:
-                    emails_vus.add(best)
-                    o["email"] = best
-                    o["source"] += " + Hunter.io"
-                    resultats.append(o)
-                    print(f"    [+] {nom} -> {best}")
+                # Vérifier si le domaine a des enregistrements MX
+                try:
+                    dns.resolver.resolve(test_domain, 'MX')
+                    # Le domaine existe ! Utiliser contact@
+                    if email_guess not in emails_vus:
+                        emails_vus.add(email_guess)
+                        o["email"] = email_guess
+                        o["source"] += " + Guess"
+                        resultats.append(o)
+                        guessed += 1
+                        if guessed % 10 == 0:
+                            print(f"    ... {guessed} emails devinés")
+                    break
+                except Exception:
+                    continue
 
-            time.sleep(0.4)
+        print(f"    {guessed} emails devines via MX lookup")
 
-        print(f"    {hunter_calls} appels effectues")
-
-    # Filtrer les emails deja envoyes
+    # Filtrer les emails déjà envoyés
     nouveaux = [r for r in resultats if r["email"].lower() not in emails_deja_envoyes]
     deja = len(resultats) - len(nouveaux)
 
     # ======= RESULTATS =======
     print()
     print("=" * 60)
-    print(f"  RESULTATS : {len(nouveaux)} nouveaux emails !")
+    print(f"  RESULTATS : {len(nouveaux)} nouveaux contacts !")
     if deja > 0:
         print(f"  ({deja} deja contactes, exclus)")
     print("=" * 60)
 
     if not nouveaux:
-        print("  [!] Aucun nouvel email. Tous deja contactes ou aucun trouve.")
+        print("  [!] Aucun nouvel email.")
         return
 
     for i, r in enumerate(nouveaux, 1):
@@ -523,19 +784,20 @@ def main():
 
     print(f"\n  [+] Sauvegarde dans emails_trouves.csv")
 
-    # Envoyer ?
+    # ======= ENVOYER =======
     print()
     choix = input("  Envoyer ton mail a tous ces contacts ? (o/N) : ").strip().lower()
     if choix == "o":
-        from config import MON_EMAIL, OBJET
         from envoyer import envoyer_mail
-        print(f"\n  [*] Envoi de {len(nouveaux)} mails...")
+        print(f"\n  [*] Envoi de {len(nouveaux)} mails personnalises...")
         ok = 0
         for i, r in enumerate(nouveaux, 1):
             email = r["email"]
-            print(f"  [{i}/{len(nouveaux)}] -> {email} ({r['entreprise']})")
+            entreprise = r["entreprise"]
+            poste = r["titre"]
+            print(f"  [{i}/{len(nouveaux)}] -> {email} ({entreprise})")
             try:
-                envoyer_mail(email)
+                envoyer_mail(email, entreprise=entreprise, poste=poste)
                 sauver_email_envoye(email)
                 ok += 1
                 time.sleep(2)
@@ -543,6 +805,18 @@ def main():
                 print(f"    [!] Echec : {e}")
         print(f"\n  [+] {ok}/{len(nouveaux)} mails envoyes !")
         print(f"  [+] Historique mis a jour dans emails_envoyes.txt")
+
+    # Stats finales
+    print()
+    print("  " + "-" * 40)
+    print(f"  STATS : {len(nouveaux)} contacts trouves")
+    sources = {}
+    for r in nouveaux:
+        src = r["source"].split(" + ")[0]
+        sources[src] = sources.get(src, 0) + 1
+    for src, nb in sorted(sources.items(), key=lambda x: x[1], reverse=True):
+        print(f"    {src:30s} : {nb}")
+    print(f"  Total emails deja envoyes : {len(emails_deja_envoyes) + (ok if choix == 'o' else 0)}")
 
 
 if __name__ == "__main__":

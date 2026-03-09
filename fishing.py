@@ -554,13 +554,6 @@ def main():
     kw_input = input("  Mots-cles (vide = recherche simple) : ").strip()
     keywords = [k.strip() for k in kw_input.split(",") if k.strip()] if kw_input else []
 
-    # Nombre max pour candidatures spontanees
-    max_spontanee = 100
-    if mode in ["2", "3"]:
-        print()
-        max_input = input("  Nombre max d'entreprises a contacter via annuaire [100] : ").strip()
-        if max_input.isdigit():
-            max_spontanee = int(max_input)
 
     # ======= COLLECTE =======
     print()
@@ -607,10 +600,8 @@ def main():
         if not departements:
             departements = ["75"]  # Par defaut Paris
 
-        max_per_dept = max(10, max_spontanee // len(departements))
-
-        print(f"\n  [SPONTANE] Annuaire Entreprises ({len(departements)} departements)...")
-        offres_annuaire = chercher_annuaire_entreprises(departements, max_par_dept=max_per_dept)
+        print(f"\n  [SPONTANE] Annuaire Entreprises ({len(departements)} departements, TOUTES les boites IT)...")
+        offres_annuaire = chercher_annuaire_entreprises(departements, max_par_dept=10000)
         print(f"    => {len(offres_annuaire)} entreprises IT trouvees")
         toutes_offres.extend(offres_annuaire)
 

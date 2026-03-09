@@ -11,7 +11,7 @@ import dns.resolver
 from datetime import datetime, timedelta
 from urllib.parse import urlparse, quote_plus
 from bs4 import BeautifulSoup
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from fishing_config import (
     FRANCE_TRAVAIL_CLIENT_ID,
     FRANCE_TRAVAIL_CLIENT_SECRET,

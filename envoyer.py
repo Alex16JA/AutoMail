@@ -58,8 +58,10 @@ def envoyer_mail(destinataire, entreprise="", poste=""):
         print("\n  [ERREUR] Authentification echouee.")
         print("  Verifie ton email et mot de passe d'application dans config.py")
         print("  Pour Gmail, genere un mot de passe ici : https://myaccount.google.com/apppasswords\n")
+        raise
     except Exception as e:
         print(f"\n  [ERREUR] {e}\n")
+        raise
 
 
 def main():

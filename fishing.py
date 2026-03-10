@@ -144,7 +144,7 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SENT_FILE = os.path.join(SCRIPT_DIR, "emails_envoyes.json")
 PENDING_FILE = os.path.join(SCRIPT_DIR, "emails_en_attente.json")
 RELANCE_JOURS = 7  # Nombre de jours avant relance
-MAX_MAILS_PAR_JOUR = 480  # Gmail limite a 500, on garde une marge
+MAX_MAILS_PAR_JOUR = 500  # Gmail limite a 500, on garde une marge
 
 
 # ============================================================

@@ -142,7 +142,9 @@ REGION_INSEE = {
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 SENT_FILE = os.path.join(SCRIPT_DIR, "emails_envoyes.json")
+PENDING_FILE = os.path.join(SCRIPT_DIR, "emails_en_attente.json")
 RELANCE_JOURS = 7  # Nombre de jours avant relance
+MAX_MAILS_PAR_JOUR = 480  # Gmail limite a 500, on garde une marge
 
 
 # ============================================================
@@ -178,6 +180,46 @@ def sauver_email_envoye(email, entreprise="", est_relance=False):
             "nb_relances": 0,
         }
     sauver_emails_envoyes(data)
+
+
+def compter_mails_envoyes_aujourdhui():
+    """Compte combien de mails ont été envoyés aujourd'hui"""
+    data = charger_emails_envoyes()
+    aujourdhui = datetime.now().strftime("%Y-%m-%d")
+    count = 0
+    for info in data.values():
+        if info.get("date", "").startswith(aujourdhui):
+            count += 1
+        if info.get("relance", "") and info["relance"].startswith(aujourdhui):
+            count += 1
+    return count
+
+
+# ============================================================
+# FILE D'ATTENTE (emails en attente pour le lendemain)
+# ============================================================
+def sauver_emails_en_attente(emails_list):
+    """Sauvegarde les emails non envoyés pour le prochain lancement"""
+    with open(PENDING_FILE, "w", encoding="utf-8") as f:
+        json.dump(emails_list, f, indent=2, ensure_ascii=False)
+    print(f"\n  [+] {len(emails_list)} emails sauvegardes dans emails_en_attente.json")
+    print(f"      Relance le script demain pour continuer l'envoi !")
+
+
+def charger_emails_en_attente():
+    """Charge les emails en attente du précédent lancement"""
+    if not os.path.exists(PENDING_FILE):
+        return []
+    try:
+        with open(PENDING_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def supprimer_emails_en_attente():
+    if os.path.exists(PENDING_FILE):
+        os.remove(PENDING_FILE)
 
 
 def get_emails_a_relancer():
@@ -782,6 +824,62 @@ def chercher_la_bonne_alternance(region_cle, types):
 
 
 # ============================================================
+# ENVOI AVEC LIMITE GMAIL
+# ============================================================
+def envoyer_liste(contacts, restant_aujourdhui):
+    """Envoie les mails avec limite quotidienne et auto-stop"""
+    from envoyer import envoyer_mail
+
+    total = len(contacts)
+    if restant_aujourdhui <= 0:
+        print(f"\n  [!] Limite Gmail deja atteinte aujourd'hui !")
+        sauver_emails_en_attente(contacts)
+        return
+
+    a_envoyer = contacts[:restant_aujourdhui]
+    restants = contacts[restant_aujourdhui:]
+
+    if restants:
+        print(f"\n  [*] Envoi de {len(a_envoyer)}/{total} mails (limite {MAX_MAILS_PAR_JOUR}/jour)")
+        print(f"      {len(restants)} seront sauvegardes pour demain")
+    else:
+        print(f"\n  [*] Envoi de {len(a_envoyer)} mails personnalises...")
+
+    ok = 0
+    gmail_limit_hit = False
+
+    for i, r in enumerate(a_envoyer, 1):
+        email = r["email"]
+        entreprise = r["entreprise"]
+        poste = r["titre"]
+        print(f"  [{i}/{len(a_envoyer)}] -> {email} ({entreprise})")
+        try:
+            envoyer_mail(email, entreprise=entreprise, poste=poste)
+            sauver_email_envoye(email, entreprise=entreprise)
+            ok += 1
+            time.sleep(2)
+        except Exception as e:
+            err_str = str(e)
+            if "5.4.5" in err_str or "Daily user sending limit" in err_str:
+                print(f"\n  [!] LIMITE GMAIL ATTEINTE apres {ok} mails !")
+                # Sauver les emails restants
+                non_envoyes = a_envoyer[i:] + restants
+                if non_envoyes:
+                    sauver_emails_en_attente(non_envoyes)
+                gmail_limit_hit = True
+                break
+            else:
+                print(f"    [!] Echec : {e}")
+
+    print(f"\n  [+] {ok}/{total} mails envoyes !")
+    print(f"  [+] Historique mis a jour dans emails_envoyes.json")
+
+    # Sauver le reste si pas atteint la limite Gmail
+    if not gmail_limit_hit and restants:
+        sauver_emails_en_attente(restants)
+
+
+# ============================================================
 # MAIN
 # ============================================================
 def main():
@@ -799,10 +897,37 @@ def main():
     if emails_deja_envoyes:
         print(f"  {len(emails_deja_envoyes)} emails deja contactes (seront exclus)")
 
+    # Compteur journalier
+    envoyes_aujourdhui = compter_mails_envoyes_aujourdhui()
+    restant_aujourdhui = max(0, MAX_MAILS_PAR_JOUR - envoyes_aujourdhui)
+    print(f"  Mails envoyes aujourd'hui : {envoyes_aujourdhui}/{MAX_MAILS_PAR_JOUR}")
+    if restant_aujourdhui == 0:
+        print("  [!] Limite Gmail atteinte pour aujourd'hui !")
+
     # Relances a faire ?
     a_relancer = get_emails_a_relancer()
     if a_relancer:
         print(f"  {len(a_relancer)} relances a faire (> {RELANCE_JOURS} jours sans reponse)")
+
+    # ======= EMAILS EN ATTENTE ======= 
+    en_attente = charger_emails_en_attente()
+    if en_attente:
+        # Filtrer ceux deja envoyes entre temps
+        en_attente = [e for e in en_attente if e["email"].lower() not in emails_deja_envoyes]
+        if en_attente:
+            print(f"\n  >>> {len(en_attente)} emails en attente du dernier lancement !")
+            choix_resume = input("  Continuer l'envoi ? (o/N) : ").strip().lower()
+            if choix_resume == "o":
+                envoyer_liste(en_attente, restant_aujourdhui)
+                supprimer_emails_en_attente()
+                # Recalculer
+                envoyes_aujourdhui = compter_mails_envoyes_aujourdhui()
+                restant_aujourdhui = max(0, MAX_MAILS_PAR_JOUR - envoyes_aujourdhui)
+                if restant_aujourdhui == 0:
+                    print("\n  [!] Limite Gmail atteinte. Relance demain pour le reste.")
+            else:
+                supprimer_emails_en_attente()
+                print("  File d'attente effacee.")
 
     # ======= MODE =======
     print()
@@ -1137,23 +1262,7 @@ def main():
                     choix_envoi = ""
 
         if choix_envoi == "o":
-            from envoyer import envoyer_mail
-            print(f"\n  [*] Envoi de {len(nouveaux)} mails personnalises...")
-            ok = 0
-            for i, r in enumerate(nouveaux, 1):
-                email = r["email"]
-                entreprise = r["entreprise"]
-                poste = r["titre"]
-                print(f"  [{i}/{len(nouveaux)}] -> {email} ({entreprise})")
-                try:
-                    envoyer_mail(email, entreprise=entreprise, poste=poste)
-                    sauver_email_envoye(email, entreprise=entreprise)
-                    ok += 1
-                    time.sleep(2)
-                except Exception as e:
-                    print(f"    [!] Echec : {e}")
-            print(f"\n  [+] {ok}/{len(nouveaux)} mails envoyes !")
-            print(f"  [+] Historique mis a jour dans emails_envoyes.json")
+            envoyer_liste(nouveaux, restant_aujourdhui)
 
     # ======= RELANCES =======
     if a_relancer:

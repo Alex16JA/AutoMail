@@ -824,59 +824,83 @@ def chercher_la_bonne_alternance(region_cle, types):
 
 
 # ============================================================
-# ENVOI AVEC LIMITE GMAIL
+# ENVOI AVEC LIMITE GMAIL + MULTI-COMPTE
 # ============================================================
 def envoyer_liste(contacts, restant_aujourdhui):
-    """Envoie les mails avec limite quotidienne et auto-stop"""
+    """Envoie les mails avec rotation de comptes Gmail et auto-stop"""
     from envoyer import envoyer_mail
+    try:
+        from config import COMPTES_GMAIL
+    except ImportError:
+        COMPTES_GMAIL = []
 
     total = len(contacts)
-    if restant_aujourdhui <= 0:
-        print(f"\n  [!] Limite Gmail deja atteinte aujourd'hui !")
-        sauver_emails_en_attente(contacts)
+    if total == 0:
         return
 
-    a_envoyer = contacts[:restant_aujourdhui]
-    restants = contacts[restant_aujourdhui:]
+    # Construire la liste des comptes disponibles
+    comptes = list(COMPTES_GMAIL) if COMPTES_GMAIL else []
+    if not comptes:
+        from config import MON_EMAIL, MON_MOT_DE_PASSE
+        comptes = [{"email": MON_EMAIL, "password": MON_MOT_DE_PASSE}]
 
-    if restants:
-        print(f"\n  [*] Envoi de {len(a_envoyer)}/{total} mails (limite {MAX_MAILS_PAR_JOUR}/jour)")
-        print(f"      {len(restants)} seront sauvegardes pour demain")
-    else:
-        print(f"\n  [*] Envoi de {len(a_envoyer)} mails personnalises...")
+    compte_idx = 0
+    compte_actuel = comptes[compte_idx]
+    limite_par_compte = MAX_MAILS_PAR_JOUR
+
+    print(f"\n  [*] Envoi de {total} mails ({len(comptes)} compte(s) Gmail disponible(s))")
+    print(f"      Compte actuel : {compte_actuel['email']}")
 
     ok = 0
-    gmail_limit_hit = False
+    ok_total = 0
 
-    for i, r in enumerate(a_envoyer, 1):
+    for i, r in enumerate(contacts):
         email = r["email"]
         entreprise = r["entreprise"]
         poste = r["titre"]
-        print(f"  [{i}/{len(a_envoyer)}] -> {email} ({entreprise})")
+        print(f"  [{i+1}/{total}] -> {email} ({entreprise})")
         try:
-            envoyer_mail(email, entreprise=entreprise, poste=poste)
+            envoyer_mail(email, entreprise=entreprise, poste=poste,
+                        sender_email=compte_actuel["email"],
+                        sender_password=compte_actuel["password"])
             sauver_email_envoye(email, entreprise=entreprise)
             ok += 1
+            ok_total += 1
             time.sleep(2)
         except Exception as e:
             err_str = str(e)
             if "5.4.5" in err_str or "Daily user sending limit" in err_str:
-                print(f"\n  [!] LIMITE GMAIL ATTEINTE apres {ok} mails !")
-                # Sauver les emails restants
-                non_envoyes = a_envoyer[i:] + restants
-                if non_envoyes:
-                    sauver_emails_en_attente(non_envoyes)
-                gmail_limit_hit = True
-                break
+                print(f"\n  [!] LIMITE GMAIL pour {compte_actuel['email']} ({ok} mails)")
+                
+                # Essayer le compte suivant
+                compte_idx += 1
+                if compte_idx < len(comptes):
+                    compte_actuel = comptes[compte_idx]
+                    ok = 0
+                    print(f"  [*] Bascule vers : {compte_actuel['email']}")
+                    # Reessayer ce mail avec le nouveau compte
+                    try:
+                        envoyer_mail(email, entreprise=entreprise, poste=poste,
+                                    sender_email=compte_actuel["email"],
+                                    sender_password=compte_actuel["password"])
+                        sauver_email_envoye(email, entreprise=entreprise)
+                        ok += 1
+                        ok_total += 1
+                        time.sleep(2)
+                    except Exception:
+                        print(f"    [!] Echec aussi sur le nouveau compte")
+                else:
+                    # Plus de comptes disponibles
+                    print(f"  [!] Plus aucun compte disponible !")
+                    non_envoyes = contacts[i:]
+                    if non_envoyes:
+                        sauver_emails_en_attente(non_envoyes)
+                    break
             else:
                 print(f"    [!] Echec : {e}")
 
-    print(f"\n  [+] {ok}/{total} mails envoyes !")
+    print(f"\n  [+] {ok_total}/{total} mails envoyes !")
     print(f"  [+] Historique mis a jour dans emails_envoyes.json")
-
-    # Sauver le reste si pas atteint la limite Gmail
-    if not gmail_limit_hit and restants:
-        sauver_emails_en_attente(restants)
 
 
 # ============================================================

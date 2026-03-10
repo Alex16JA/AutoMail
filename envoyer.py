@@ -8,11 +8,15 @@ from email import encoders
 from config import MON_EMAIL, MON_MOT_DE_PASSE, SMTP_SERVEUR, SMTP_PORT, OBJET, CONTENU, PIECES_JOINTES
 
 
-def envoyer_mail(destinataire, entreprise="", poste=""):
+def envoyer_mail(destinataire, entreprise="", poste="", sender_email=None, sender_password=None):
     """Envoie un mail avec personnalisation optionnelle.
     
     Les variables {entreprise}, {poste} sont remplacees dans l'objet et le contenu.
+    sender_email/sender_password: utiliser un autre compte que le defaut.
     """
+    email_from = sender_email or MON_EMAIL
+    password = sender_password or MON_MOT_DE_PASSE
+
     # Personnaliser le contenu
     objet = OBJET
     contenu = CONTENU
@@ -25,7 +29,7 @@ def envoyer_mail(destinataire, entreprise="", poste=""):
         contenu = contenu.replace("{poste}", poste)
 
     msg = MIMEMultipart()
-    msg["From"] = MON_EMAIL
+    msg["From"] = email_from
     msg["To"] = destinataire
     msg["Subject"] = objet
 
@@ -50,7 +54,7 @@ def envoyer_mail(destinataire, entreprise="", poste=""):
     try:
         server = smtplib.SMTP(SMTP_SERVEUR, SMTP_PORT)
         server.starttls()
-        server.login(MON_EMAIL, MON_MOT_DE_PASSE)
+        server.login(email_from, password)
         server.send_message(msg)
         server.quit()
         print(f"\n  >>> Mail envoye a {destinataire} !\n")
